@@ -1,0 +1,5 @@
+# Optional ML extras — only needed to TRAIN the CNN emotion model (sentiment/cnn_fer.py).
+# Install with:  .venv/bin/python -m pip install -r requirements-ml.txt
+torch>=2.2
+torchvision>=0.17
+pandas>=2.2

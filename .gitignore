@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.task
+models/*.task
+data/fer2013.csv
+data/samples/
+reports/
+*.joblib
+*.pt
+.DS_Store

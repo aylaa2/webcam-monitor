@@ -1,0 +1,9 @@
+# Core runtime — everything needed to run both demos, fully offline.
+# Tested on Python 3.12 (macOS arm64). MediaPipe has no wheels for 3.13/3.14 yet.
+opencv-python>=4.9
+mediapipe>=0.10.14
+numpy>=1.26,<2.1
+scikit-learn>=1.4
+pyautogui>=0.9.54
+matplotlib>=3.8
+joblib>=1.3
