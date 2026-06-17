@@ -38,20 +38,23 @@ class GestureRecognizer:
     def __init__(
         self,
         grab_window: float = 0.8,      # max seconds between open palm and fist
-        swipe_dist: float = 0.22,      # min normalized wrist travel for a swipe
+        swipe_dist: float = 0.28,      # min normalized wrist travel for a swipe
         swipe_time: float = 0.35,      # window over which travel is measured
-        cooldown: float = 1.0,         # min seconds between any two fired events
-        hold_frames: int = 8,          # frames a static gesture must persist
+        cooldown: float = 1.6,         # min seconds between any two fired events
+        refractory: float = 1.1,       # post-gesture lockout: ignore + clear buffers
+        hold_frames: int = 7,          # frames a static gesture must persist
     ) -> None:
         self.grab_window = grab_window
         self.swipe_dist = swipe_dist
         self.swipe_time = swipe_time
         self.cooldown = cooldown
+        self.refractory = refractory
         self.hold_frames = hold_frames
 
         self._last_open_t = 0.0
         self._traj: deque[tuple[float, float, float]] = deque()  # (t, x, y)
         self._last_event_t = 0.0
+        self._refractory_until = 0.0
         self._pinch_active = False
         self._hold_pose = ""
         self._hold_count = 0
@@ -60,8 +63,15 @@ class GestureRecognizer:
     def _cooling_down(self, now: float) -> bool:
         return (now - self._last_event_t) < self.cooldown
 
+    def locked(self) -> bool:
+        """True while in the post-gesture refractory window (for the HUD)."""
+        return time.monotonic() < self._refractory_until
+
     def _fire(self, event: str, now: float) -> str:
         self._last_event_t = now
+        self._refractory_until = now + self.refractory
+        self._traj.clear()
+        self._last_open_t = 0.0
         return event
 
     def update(self, hand) -> str | None:
@@ -79,6 +89,19 @@ class GestureRecognizer:
         pose = poses.classify(lm)
         wrist = lm[poses.WRIST, :2]
 
+        # --- refractory lockout: after a gesture fires, ignore input briefly and
+        #     keep buffers clean so the hand returning to rest can't re-trigger ---
+        if now < self._refractory_until:
+            self._traj.clear()
+            self._last_open_t = 0.0
+            self._hold_pose = pose
+            self._hold_count = 0
+            self._pinch_active = pose == poses.PINCH
+            # block an immediate static re-fire of whatever is being held
+            if pose in (poses.THUMBS_UP, poses.THUMBS_DOWN, poses.PEACE):
+                self._latched = pose
+            return None
+
         # --- maintain a short wrist trajectory for swipes ---
         self._traj.append((now, float(wrist[0]), float(wrist[1])))
         while self._traj and now - self._traj[0][0] > self.swipe_time:
@@ -95,8 +118,8 @@ class GestureRecognizer:
             self._last_open_t = 0.0
             return self._fire(GRAB, now)
 
-        # --- SWIPE: large net wrist displacement while hand is open-ish ---
-        if pose in (poses.OPEN_PALM, poses.POINT) and len(self._traj) >= 3:
+        # --- SWIPE: large net wrist displacement with a clearly open palm ---
+        if pose == poses.OPEN_PALM and len(self._traj) >= 3:
             t0, x0, y0 = self._traj[0]
             dx, dy = wrist[0] - x0, wrist[1] - y0
             if not self._cooling_down(now):

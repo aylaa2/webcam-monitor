@@ -8,6 +8,7 @@ Usage:
 """
 from __future__ import annotations
 
+import os
 import sys
 import urllib.request
 from pathlib import Path
@@ -24,6 +25,11 @@ MODELS = {
         "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
     ),
 }
+
+# Offline speech-to-text model (Vosk) for the HR interview report. Unzips to a
+# folder; skipped automatically if already present.
+VOSK_ZIP_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
+VOSK_DIR_NAME = "vosk-model-small-en-us-0.15"
 
 MODELS_DIR = Path(__file__).parent / "models"
 
@@ -50,6 +56,49 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"\n[fail] could not download {name}: {exc}")
             return 1
+
+    # Vosk speech model (zip -> folder).
+    vosk_dir = MODELS_DIR / VOSK_DIR_NAME
+    if vosk_dir.exists():
+        print(f"[skip] {VOSK_DIR_NAME} already present")
+    else:
+        print(f"[get ] {VOSK_DIR_NAME} (offline speech-to-text)")
+        try:
+            import zipfile
+
+            zip_path = MODELS_DIR / "vosk.zip"
+            urllib.request.urlretrieve(VOSK_ZIP_URL, zip_path, _progress)
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(MODELS_DIR)
+            zip_path.unlink()
+            print(f"\r    done -> {vosk_dir}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"\n[warn] speech model failed ({exc}); interview will run face-only.")
+
+    # Whisper (faster-whisper) — multilingual ASR for the HR report.
+    whisper_size = os.environ.get("WHISPER_MODEL", "medium")
+    whisper_dir = MODELS_DIR / "whisper"
+    print(f"[get ] whisper {whisper_size} (multilingual speech-to-text)")
+    try:
+        from faster_whisper import WhisperModel
+
+        WhisperModel(whisper_size, device="cpu", compute_type="int8",
+                     download_root=str(whisper_dir))
+        print(f"    done -> {whisper_dir}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] whisper download skipped ({exc}); will fall back to Vosk/face-only.")
+
+    # Multilingual sentence-embedding model for the semantic STAR/topic classifier.
+    print("[get ] embedding model (semantic STAR / topic classifier)")
+    try:
+        from fastembed import TextEmbedding
+
+        TextEmbedding(model_name="sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+                      cache_dir=str(MODELS_DIR / "embed"))
+        print(f"    done -> {MODELS_DIR / 'embed'}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] embedding model skipped ({exc}); will fall back to keyword rules.")
+
     print("\nAll models ready.")
     return 0
 

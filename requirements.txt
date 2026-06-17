@@ -7,3 +7,10 @@ scikit-learn>=1.4
 pyautogui>=0.9.54
 matplotlib>=3.8
 joblib>=1.3
+# Voice-tone + offline speech-to-text for the HR interview report (Feature 1).
+# Optional: the interview runs face-only if these or the speech model are missing.
+sounddevice>=0.4.6
+faster-whisper>=1.0     # multilingual offline ASR (Romanian + English, accurate)
+fastembed>=0.3         # multilingual sentence embeddings (semantic topic/STAR classifier)
+vosk>=0.3.44            # lighter English-only fallback recognizer
+pillow>=10             # Unicode text rendering in report windows (diacritics)

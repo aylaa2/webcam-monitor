@@ -6,8 +6,8 @@ Two real-time computer-vision systems that run **100% locally** on a laptop CPU 
 
 | Feature | What it does | Core technique (non-LLM) |
 |---|---|---|
-| **Interview analysis** | Calibrates to your neutral face, reads live sentiment + engagement, then writes a description of how you felt with the timestamps of your most emotional moments + an annotated graph | Face-mesh landmarks → **per-person baseline calibration** → hand-crafted geometric features → SVM / RandomForest + rule baseline → **HMM temporal smoothing** → weighted multi-cue fusion |
-| **Gesture control** | Hand gestures trigger macOS actions (open palm → fist closes the window, swipe to change slides, etc.) | Hand landmarks → geometric pose rules → **finite-state machine** for dynamic gestures → keystroke actions |
+| **Interview analysis** | Calibrates to your face, records you (any length), then builds a clickable multimodal **HR report** — soft + hard skills (with the exact quotes behind each), **STAR-method** coverage, background & key concepts, how you felt, voice tone + full transcript — from **face + voice + words** | Face-mesh landmarks (+ baseline calibration, speech-aware emotion) · **DSP prosody** (autocorrelation pitch, energy, pauses) · **multilingual offline ASR** (Whisper, Romanian + English) + lexicon/STAR analysis · HMM smoothing · transparent weighted fusion |
+| **Gesture control** | Hand gestures trigger macOS actions (open palm → fist closes the window, ✌️ = screenshot, swipe = slides, etc.) | Hand landmarks → geometric pose rules → **finite-state machine** with a refractory lock → real OS actions |
 
 Everything below the landmark detector is transparent math you can point at and
 explain — which is the whole pedagogical point.
@@ -29,6 +29,12 @@ explain — which is the whole pedagogical point.
   3. **Deep learning** — a small **CNN** trained on FER2013 (optional).
 - **Classic probabilistic + automata theory.** A **Hidden-Markov-style filter**
   steadies the emotion signal; a **finite-state machine** parses gesture grammar.
+- **Multimodal fusion without an LLM.** The HR report combines three independent
+  signal streams — face (vision), voice tone (DSP), and words (offline ASR +
+  lexicons + STAR/keyword rules) — into explainable, *evidence-linked* scores
+  (click any score to see the quotes behind it). Speech is transcribed by an
+  offline **ASR** model (Whisper/Vosk), and all the *analysis* on top of the
+  transcript is transparent rule/lexicon logic — no language model.
 
 ---
 
@@ -67,12 +73,14 @@ explain — which is the whole pedagogical point.
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python download_models.py          # one-time ~10 MB model download
+python download_models.py          # one-time download (~2.5 GB: vision + Whisper-medium + embeddings)
 ```
 
 macOS permissions:
 - **Camera** — grant your terminal/IDE access (System Settings → Privacy &
   Security → Camera). Run from your own Terminal so the prompt can appear.
+- **Microphone** — for the interview's voice/transcript analysis. Without it the
+  interview still runs face-only and the report says so.
 - **Accessibility** — needed for the keystroke gestures (close window, slides,
   play/pause, switch app, mission control). Volume, mute and screenshot use
   AppleScript / `screencapture` and work *without* it.
@@ -82,17 +90,51 @@ macOS permissions:
 ## Usage
 
 ```bash
-# Feature 1 — interview sentiment analysis
+# Feature 1 — Interview Studio (native windows, recording-style UI)
 python app.py interview
-#   1) hold a NEUTRAL face ~2.5s while it calibrates to you
-#   2) react naturally; press 'q' to finish
-#   -> prints a written description of how you felt + peak emotional moments,
-#      and saves an annotated graph + text report to ./reports
+python app.py interview --camera 1   # pick a different camera if needed
 
-# Feature 2 — gesture control (LIVE: actually controls macOS)
+# Feature 2 — Gesture Control (LIVE: actually controls macOS)
 python app.py gestures
-python app.py gestures --dry-run   # safe preview: prints actions, controls nothing
+python app.py gestures --dry-run    # safe preview: logs actions, controls nothing
 ```
+
+### Interview Studio
+
+A **"Interview Studio"** window with recording controls plus an **"Interview Report"**
+window (HR analysis):
+
+1. Click **Start Recording** (or press **SPACE**). Hold a **neutral face ~2.5s**
+   while it calibrates to you, then speak/react naturally (the mic records too).
+2. Click **Stop** / press **q** to end the recording — the **Interview Report**
+   window opens with a full **HR analysis** built from **face + voice + words**:
+   - **soft skills** (communication, confidence, composure, enthusiasm,
+     positivity, engagement) as scored bars
+   - **hard skills** — technical keywords you actually mentioned
+   - **STAR method** coverage (Situation / Task / Action / Result) — detected
+     **semantically** by a multilingual sentence-embedding classifier, not keywords
+   - **topics discussed**, **key concepts**, and **background** highlights — the
+     classifier tags each thing you said as a STAR part, background, or a
+     soft/hard-skill topic (works in Romanian and English)
+   - **voice & speech** metrics (pace/WPM, filler words, pitch, energy, pauses)
+   - **how you felt** + **peak emotional moments** + the emotion graph
+   - a written **HR recommendation** with watch-outs
+3. **Click any skill, STAR, "Background", or "Full transcript"** in the report
+   (look for `more >`) to open a detail window showing **the exact sentences you
+   said** (with timestamps) behind that score.
+4. The app stays open — **Start another recording** any time. **ESC** / **Quit**
+   exits. Each session also saves a PNG + TXT in `./reports`.
+
+> **Languages:** speech is transcribed by **Whisper (medium)** offline, which
+> auto-detects the language — **Romanian (with diacritics) and English both work**
+> (and ~97 others). Override the model with `WHISPER_MODEL=large-v3` (most
+> accurate) or `=small` (fastest). **Recording length:** unlimited in practice
+> (audio ~4 MB/min in RAM). No mic or speech model? The interview runs face-only.
+
+### Gesture Control
+
+A **"Gesture Control"** window (live hands + gesture legend) plus a separate
+**"Action Log"** window that records every action it performs, with timestamps.
 
 ### Gesture cheat-sheet
 
@@ -143,16 +185,25 @@ vs learned features" experiments section.
 app.py                  entry point (interview | gestures)
 download_models.py      fetch MediaPipe .task bundles
 vision/                 shared core: camera, face/hand trackers, drawing
-  camera.py  face.py  hands.py  draw.py
+  camera.py  face.py  hands.py  draw.py  ui.py  textrender.py
 sentiment/              Feature 1
-  features.py           EAR, smile, gaze, head-pose geometry
-  blendshape_emotion.py rule baseline (+ valence/arousal)
+  features.py           EAR, smile, gaze, head pose, speaking detector
+  blendshape_emotion.py rule baseline (speech-aware) + valence/arousal
+  calibration.py        per-person neutral baseline
   classifier.py         SVM/RandomForest wrapper
   temporal.py           HMM-style emotion filter
   fusion.py             engagement score
-  report.py             debrief + timeline plot
-  run_interview.py      the live loop
+  report.py             emotion description + graph + window image
+  hr.py                 multimodal HR report (soft/hard skills, fusion)
+  run_interview.py      the recording-studio loop
   collect_data.py  train_svm.py  cnn_fer.py  train_cnn.py
+audio/                  voice + words (Feature 1)
+  prosody.py            DSP voice-tone features (pitch/energy/pauses)
+  capture.py            background mic recording
+  transcribe.py         offline ASR — Whisper (multilingual) + Vosk fallback
+  lexicon.py            fillers, sentiment, action verbs, hard-skill keywords
+  nlp.py                STAR cues, background + key-concept extraction (fallback)
+  classify.py           multilingual embedding classifier (STAR / topic / background)
 gestures/               Feature 2
   poses.py              static pose geometry
   state_machine.py      dynamic gesture FSM

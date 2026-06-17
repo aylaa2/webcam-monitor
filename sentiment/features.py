@@ -13,6 +13,7 @@ inspectable alternative to a CNN.
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 
 import cv2
@@ -143,3 +144,25 @@ class BlinkCounter:
         if elapsed_s <= 0:
             return 0.0
         return self.count / (elapsed_s / 60.0)
+
+
+class SpeakingDetector:
+    """Estimate whether the mouth is *talking* vs holding an expression.
+
+    Talking makes the jaw oscillate open/closed; a held emotion does not. We
+    measure the short-window standard deviation of jawOpen — high variance =>
+    speaking. Returns a continuous [0,1] 'speaking' level used to discount the
+    open-mouth contribution to emotion.
+    """
+
+    def __init__(self, window: int = 20, floor: float = 0.02, scale: float = 0.07) -> None:
+        self.buf: deque[float] = deque(maxlen=window)
+        self.floor = floor
+        self.scale = scale
+
+    def update(self, jaw_open: float) -> float:
+        self.buf.append(float(jaw_open))
+        if len(self.buf) < 8:
+            return 0.0
+        std = float(np.std(np.fromiter(self.buf, dtype=np.float32)))
+        return float(np.clip((std - self.floor) / self.scale, 0.0, 1.0))

@@ -245,6 +245,91 @@ class Recorder:
         plt.close(fig)
         return out
 
+    # ----------------------------------------------------------- window image
+    def render_image(self, graph_path: Path | None = None, width: int = 880) -> np.ndarray:
+        """Render the full report (stats + description + moments + graph) into a
+        single BGR image, for display in a native OpenCV 'Session Report' window."""
+        import cv2
+
+        BG, FG, DIM, ACC, HOT = (30, 28, 26), (238, 238, 238), (165, 165, 160), \
+            (120, 200, 140), (110, 110, 235)
+        s = self.summary()
+        if not s:
+            canvas = np.full((180, width, 3), BG, np.uint8)
+            cv2.putText(canvas, "No session data captured (was a face visible?)",
+                        (24, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.6, FG, 1, cv2.LINE_AA)
+            return canvas
+
+        pad, line_h = 24, 24
+        desc_lines = _wrap(self.describe(), 92)
+        moments = self.emotional_moments()
+        stats = [
+            ("Duration", fmt_time(s["duration_s"])),
+            ("Dominant emotion", s["dominant_emotion"]),
+            ("Engagement", f"{s['mean_engagement'] * 100:.0f}/100"),
+            ("Eye contact", f"{s['eye_contact_pct']:.0f}%"),
+            ("Positivity", f"{s['positivity'] * 100:.0f}/100"),
+            ("Expressiveness", f"{s['expressiveness'] * 100:.0f}/100"),
+            ("Composure", f"{s['composure'] * 100:.0f}/100"),
+            ("Blink rate", f"{s['blink_rate']:.0f}/min"),
+        ]
+
+        graph = None
+        gh = 0
+        if graph_path and Path(graph_path).exists():
+            g = cv2.imread(str(graph_path))
+            if g is not None:
+                gh = int(width * g.shape[0] / g.shape[1])
+                graph = cv2.resize(g, (width, gh))
+
+        rows = (len(stats) + 1) // 2
+        text_h = (pad + 30 + 12) + rows * line_h + 12 + 26 + len(desc_lines) * 22 \
+            + 12 + 26 + max(1, len(moments)) * 22 + pad
+        canvas = np.full((text_h + gh, width, 3), BG, np.uint8)
+
+        def put(txt, x, y, color=FG, scale=0.5, thick=1):
+            cv2.putText(canvas, txt, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color,
+                        thick, cv2.LINE_AA)
+
+        y = pad + 18
+        put("SESSION REPORT", pad, y, ACC, 0.8, 2)
+        y += 18
+        cv2.line(canvas, (pad, y), (width - pad, y), (70, 68, 64), 1)
+        y += 24
+
+        col2 = width // 2
+        for i in range(rows):
+            for j, idx in enumerate((i, i + rows)):
+                if idx >= len(stats):
+                    continue
+                lbl, val = stats[idx]
+                x = pad if j == 0 else col2
+                put(f"{lbl}:", x, y, DIM)
+                put(val, x + 165, y, FG)
+            y += line_h
+        y += 12
+
+        put("How they felt", pad, y, ACC, 0.6, 2)
+        y += 26
+        for ln in desc_lines:
+            put(ln, pad, y, FG)
+            y += 22
+        y += 12
+
+        put("Peak emotional moments", pad, y, ACC, 0.6, 2)
+        y += 26
+        if moments:
+            for t, emo, v in moments:
+                put(f"{fmt_time(t):>6}   {emo:<10} {v * 100:3.0f}%", pad, y, HOT)
+                y += 22
+        else:
+            put("steady affect — no strong peaks", pad, y, DIM)
+            y += 22
+
+        if graph is not None:
+            canvas[text_h:text_h + gh, 0:width] = graph
+        return canvas
+
 
 def _wrap(text: str, width: int) -> list[str]:
     words, lines, cur = text.split(), [], ""

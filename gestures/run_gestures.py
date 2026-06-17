@@ -1,18 +1,23 @@
-"""Gesture mode: webcam -> hand landmarks -> pose -> FSM -> real macOS action.
+"""Gesture control studio — webcam gestures drive real macOS actions, with a
+separate native "Action Log" window recording every action that fired.
 
-Accuracy aids:
-  - EMA smoothing of the controlling hand's landmarks (kills jitter)
-  - hold-to-confirm on static gestures + per-action cooldown (no accidental fires)
+Two windows:
+  - "Gesture Control" : live camera, hand skeletons, gesture legend, current pose.
+  - "Action Log"      : timestamped, scrolling history of every action performed.
 
+Accuracy aids: EMA-smoothed hand landmarks + hold-to-confirm + per-action cooldown.
+
+Controls:  q or ESC = quit
 Run:
-    python app.py gestures            # LIVE — actually controls macOS
-    python app.py gestures --dry-run  # safe preview, prints actions only
+    python app.py gestures            # LIVE — controls macOS
+    python app.py gestures --dry-run  # safe preview, prints/logs only
     python app.py gestures --camera 1
 """
 from __future__ import annotations
 
 import time
 import types
+from collections import deque
 
 import cv2
 import numpy as np
@@ -20,11 +25,12 @@ import numpy as np
 from gestures import poses
 from gestures.actions import ActionController
 from gestures.state_machine import GestureRecognizer
-from vision import draw
+from vision import draw, ui
 from vision.camera import Camera
 from vision.hands import HandTracker
 
-_LM_EMA = 0.5  # landmark smoothing (higher = snappier, lower = steadier)
+MAIN, LOG = "Gesture Control", "Action Log"
+_LM_EMA = 0.5
 _LEGEND = [
     ("open palm -> fist", "close window"),
     ("swipe L / R", "prev / next slide"),
@@ -53,21 +59,52 @@ def _draw_legend(frame):
         y += 22
 
 
+def _render_log(entries: deque, total: int, live: bool) -> np.ndarray:
+    width, rows = 440, 18
+    canvas = np.full((70 + rows * 26, width, 3), (30, 28, 26), np.uint8)
+    ui.text(canvas, "ACTION LOG", 20, 34, (120, 200, 140), 0.8, 2)
+    mode = "LIVE" if live else "DRY-RUN"
+    ui.text(canvas, f"{mode}   total: {total}", 20, 56, (165, 165, 160), 0.5)
+    cv2.line(canvas, (20, 66), (width - 20, 66), (70, 68, 64), 1)
+    y = 92
+    for ts, label in list(entries)[-rows:][::-1]:
+        ui.text(canvas, ts, 20, y, (150, 180, 235), 0.5)
+        ui.text(canvas, label, 110, y, (238, 238, 238), 0.5)
+        y += 26
+    if not entries:
+        ui.text(canvas, "make a gesture to begin...", 20, 92, (120, 120, 118), 0.5)
+    return canvas
+
+
 def run(camera_index: int = 0, live: bool = True) -> None:
     tracker = HandTracker(num_hands=2)
-    recognizer = GestureRecognizer(cooldown=1.2, hold_frames=6)
+    recognizer = GestureRecognizer()  # defaults tuned for reliability + refractory
     controller = ActionController(dry_run=not live)
+
+    cv2.namedWindow(MAIN)
+    cv2.moveWindow(MAIN, 60, 60)
+    log: deque[tuple[str, str]] = deque(maxlen=200)
+    total = 0
+    log_placed = False
 
     smoothed_lm = None
     toast_msg, toast_t = "", 0.0
     switch_cooldown = 0.0
     fps_t, fps = time.monotonic(), 0.0
 
-    banner = "LIVE — controlling macOS" if live else "DRY-RUN — printing only"
-    print(f"Gesture mode ready.  [{banner}]")
+    banner = "LIVE - controlling macOS" if live else "DRY-RUN - logging only"
+    print(f"Gesture Control open.  [{banner}]   q/ESC to quit.")
     if live:
         print("  (window/slide/play actions need Terminal in Accessibility permissions)")
-    print("Press 'q' to quit.")
+
+    def record(event):
+        nonlocal total, toast_msg, toast_t
+        label = controller.dispatch(event)
+        if label:
+            log.append((time.strftime("%H:%M:%S"), label))
+            toast_msg, toast_t = label, time.monotonic()
+            return True
+        return False
 
     with Camera(camera_index) as cam:
         while True:
@@ -75,11 +112,10 @@ def run(camera_index: int = 0, live: bool = True) -> None:
             if frame is None:
                 continue
             hands = tracker.process(frame)
-            for h in hands:
-                draw.draw_hand(frame, h.landmarks)
+            for hnd in hands:
+                draw.draw_hand(frame, hnd.landmarks)
 
             primary = _primary_hand(hands)
-            # EMA-smooth the controlling hand's landmarks for stable poses.
             if primary is not None:
                 if smoothed_lm is None or smoothed_lm.shape != primary.landmarks.shape:
                     smoothed_lm = primary.landmarks.copy()
@@ -91,37 +127,41 @@ def run(camera_index: int = 0, live: bool = True) -> None:
                 hand_in = None
 
             event = recognizer.update(hand_in)
-            if event:
-                label = controller.dispatch(event)
-                if label:
-                    toast_msg, toast_t = label, time.monotonic()
+            if event and record(event):
+                total += 1
 
             now = time.monotonic()
             if (len(hands) == 2
-                    and all(poses.classify(h.landmarks) == poses.OPEN_PALM for h in hands)
+                    and all(poses.classify(hd.landmarks) == poses.OPEN_PALM for hd in hands)
                     and now - switch_cooldown > 1.5):
                 switch_cooldown = now
-                label = controller.dispatch("SWITCH")
-                if label:
-                    toast_msg, toast_t = label, now
+                if record("SWITCH"):
+                    total += 1
 
-            # --- HUD ---
+            # --- main HUD ---
             draw.panel(frame, 10, 10, 360, 86)
-            draw.text(frame, "Gesture control", 22, 36, draw.WHITE, 0.7, 2)
+            draw.text(frame, "Gesture Control", 22, 36, draw.WHITE, 0.7, 2)
             draw.text(frame, banner, 22, 58, draw.RED if live else draw.GREEN, 0.5)
-            pose_now = poses.classify(hand_in.landmarks) if hand_in else "—"
+            pose_now = poses.classify(hand_in.landmarks) if hand_in else "-"
             draw.text(frame, f"pose: {pose_now}", 22, 80, draw.DIM, 0.5)
+            locked = recognizer.locked()
+            draw.text(frame, "WAIT" if locked else "READY", 250, 80,
+                      draw.RED if locked else draw.GREEN, 0.5, 2)
             _draw_legend(frame)
-
             fps = 0.9 * fps + 0.1 * (1.0 / max(1e-3, now - fps_t))
             fps_t = now
             draw.text(frame, f"{fps:4.0f} fps", 300, 36, draw.DIM, 0.5)
-
             if toast_msg and now - toast_t < 1.2:
                 draw.toast(frame, toast_msg)
 
-            cv2.imshow("Gesture control  (q to quit)", frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            cv2.imshow(MAIN, frame)
+            cv2.imshow(LOG, _render_log(log, total, live))
+            if not log_placed:
+                cv2.moveWindow(LOG, 60 + 1290, 60)
+                log_placed = True
+
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), 27):
                 break
 
     tracker.close()

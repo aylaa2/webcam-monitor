@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 *.task
 models/*.task
+models/vosk-model-*/
+models/whisper/
+models/embed/
 data/fer2013.csv
 data/samples/
 reports/
