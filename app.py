@@ -20,6 +20,8 @@ def main() -> None:
 
     p_int = sub.add_parser("interview", help="facial sentiment & engagement analysis")
     p_int.add_argument("--camera", type=int, default=0)
+    p_int.add_argument("--lang", choices=["auto", "en", "ro"], default=None,
+                       help="transcript language (default: auto; toggle live with 'l')")
 
     p_ges = sub.add_parser("gestures", help="hand-gesture control")
     p_ges.add_argument("--camera", type=int, default=0)
@@ -30,7 +32,7 @@ def main() -> None:
 
     if args.mode == "interview":
         from sentiment.run_interview import run
-        run(camera_index=args.camera)
+        run(camera_index=args.camera, lang=args.lang)
     elif args.mode == "gestures":
         from gestures.run_gestures import run
         run(camera_index=args.camera, live=not args.dry_run)

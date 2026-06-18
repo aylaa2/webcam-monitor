@@ -44,15 +44,25 @@ class Recorder:
     engagement: list[Engagement] = field(default_factory=list)
     valence: list[float] = field(default_factory=list)
     arousal: list[float] = field(default_factory=list)
+    gaze_x: list[float] = field(default_factory=list)
+    gaze_y: list[float] = field(default_factory=list)
+    yaw: list[float] = field(default_factory=list)
+    pitch: list[float] = field(default_factory=list)
     blink_total: int = 0
 
-    def add(self, emo, eng: Engagement, valence: float, arousal: float) -> None:
+    def add(self, emo, eng: Engagement, valence: float, arousal: float,
+            gaze_x: float = 0.0, gaze_y: float = 0.0, yaw: float = 0.0,
+            pitch: float = 0.0) -> None:
         self.t.append(time.monotonic() - self.t0)
         self.emotions.append(emo)
         self.top_emotion.append(max(emo, key=emo.get))
         self.engagement.append(eng)
         self.valence.append(valence)
         self.arousal.append(arousal)
+        self.gaze_x.append(gaze_x)
+        self.gaze_y.append(gaze_y)
+        self.yaw.append(yaw)
+        self.pitch.append(pitch)
 
     # ----------------------------------------------------------------- stats
     def _avg(self, attr: str) -> float:
@@ -70,13 +80,15 @@ class Recorder:
         variability = switches / max(1, n - 1)
         dominant = Counter(self.top_emotion).most_common(1)[0][0]
         dur = self.t[-1]
+        # eye contact = % of frames the subject was clearly looking at the camera.
+        looking = sum(1 for e in self.engagement if e.eye_contact >= 0.5) / n
         return {
             "duration_s": dur,
             "frames": n,
             "dominant_emotion": dominant,
             "mean_engagement": self._avg("overall"),
             "attentiveness": self._avg("facing"),
-            "eye_contact_pct": 100.0 * self._avg("eye_contact"),
+            "eye_contact_pct": 100.0 * looking,
             "positivity": self._avg("positivity"),
             "composure": self._avg("composure"),
             "mean_valence": sum(self.valence) / n,

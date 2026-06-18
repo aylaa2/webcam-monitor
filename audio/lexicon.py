@@ -35,20 +35,54 @@ ACTION_VERBS = {
 # Hard-skill keyword map: category -> trigger words.
 HARD_SKILLS: dict[str, set[str]] = {
     "Programming": {"python", "java", "javascript", "typescript", "c++", "c#",
-                    "coding", "programming", "software", "code", "rust", "go", "php"},
+                    "coding", "programming", "software", "code", "rust", "go", "php",
+                    "ruby", "kotlin", "swift", "scala", "algorithm", "algorithms",
+                    "object-oriented", "functional"},
     "Data / ML": {"machine", "learning", "ml", "ai", "data", "statistics",
-                  "analytics", "model", "neural", "pandas", "numpy", "tensorflow",
-                  "pytorch"},
+                  "analytics", "model", "models", "neural", "pandas", "numpy",
+                  "tensorflow", "pytorch", "regression", "classification", "nlp",
+                  "deep", "dataset", "training", "scikit"},
     "Web / Frontend": {"react", "angular", "vue", "html", "css", "frontend",
-                       "node", "django", "flask", "api", "backend"},
+                       "node", "django", "flask", "api", "rest", "backend",
+                       "fullstack", "javascript", "nextjs", "express", "graphql"},
     "Cloud / DevOps": {"aws", "azure", "gcp", "cloud", "docker", "kubernetes",
-                       "devops", "ci", "cd", "linux", "terraform"},
-    "Databases": {"sql", "database", "postgres", "mysql", "mongodb", "redis"},
-    "Design": {"design", "ui", "ux", "figma", "photoshop", "prototype"},
-    "Management": {"agile", "scrum", "project", "leadership", "team", "roadmap",
-                   "stakeholder", "kanban"},
+                       "devops", "ci", "cd", "linux", "terraform", "deployment",
+                       "pipeline", "ansible", "jenkins", "microservices"},
+    "Databases": {"sql", "database", "databases", "postgres", "postgresql",
+                  "mysql", "mongodb", "redis", "nosql", "query", "queries", "schema"},
+    "Mobile": {"android", "ios", "flutter", "react-native", "mobile", "swiftui"},
+    "Security": {"security", "cybersecurity", "encryption", "authentication",
+                 "vulnerability", "penetration", "firewall", "oauth"},
+    "Testing / QA": {"testing", "test", "tests", "unit", "integration", "pytest",
+                     "selenium", "qa", "automation"},
+    "Design": {"design", "ui", "ux", "figma", "photoshop", "prototype",
+               "wireframe", "illustrator", "branding"},
+    "Project Management": {"agile", "scrum", "kanban", "jira", "roadmap",
+                           "stakeholder", "sprint", "backlog"},
     "Business": {"marketing", "sales", "finance", "accounting", "budget",
-                 "strategy", "revenue", "customer"},
+                 "strategy", "revenue", "customer", "seo", "growth"},
+}
+
+# Soft-skill keyword map (backup to the semantic classifier).
+SOFT_SKILLS: dict[str, set[str]] = {
+    "Communication": {"communication", "communicate", "communicated", "present",
+                      "presented", "presentation", "explain", "explained",
+                      "articulate", "writing", "wrote", "documented"},
+    "Teamwork": {"team", "teamwork", "collaborate", "collaborated", "collaboration",
+                 "colleagues", "cooperate", "together", "peers"},
+    "Leadership": {"lead", "led", "leadership", "manage", "managed", "management",
+                   "mentor", "mentored", "ownership", "initiative", "coordinated",
+                   "supervised", "guided"},
+    "Problem-solving": {"problem", "problems", "solve", "solved", "analytical",
+                        "troubleshoot", "debug", "debugged", "critical", "logical"},
+    "Adaptability": {"adapt", "adapted", "flexible", "flexibility", "learn",
+                     "learned", "quickly", "versatile", "self-taught"},
+    "Time management": {"deadline", "deadlines", "prioritize", "prioritized",
+                        "organize", "organized", "schedule", "planning", "punctual"},
+    "Creativity": {"creative", "creativity", "innovative", "innovation", "idea",
+                   "ideas", "brainstorm", "imaginative"},
+    "Work ethic": {"hardworking", "dedicated", "reliable", "responsible",
+                   "committed", "motivated", "proactive", "diligent"},
 }
 
 
@@ -64,10 +98,12 @@ class WordStats:
     sentiment: float = 0.0            # -1 .. +1 (lexicon-based)
     vocab_richness: float = 0.0       # unique / total
     hard_skills: dict[str, list[str]] = field(default_factory=dict)
+    soft_skills: dict[str, list[str]] = field(default_factory=dict)
 
 
 def tokenize(text: str) -> list[str]:
-    return re.findall(r"[a-zA-Z']+", text.lower())
+    # Unicode letters so Romanian diacritics (ă â î ș ț) stay part of the word.
+    return re.findall(r"[^\W\d_]+", text.lower(), re.UNICODE)
 
 
 def analyze(text: str) -> WordStats:
@@ -80,12 +116,17 @@ def analyze(text: str) -> WordStats:
     neg = sum(1 for w in words if w in NEGATIVE)
     actions = sum(1 for w in words if w in ACTION_VERBS)
 
-    found: dict[str, list[str]] = {}
     wordset = set(words)
+    found_hard: dict[str, list[str]] = {}
     for cat, keys in HARD_SKILLS.items():
         hits = sorted(wordset & keys)
         if hits:
-            found[cat] = hits
+            found_hard[cat] = hits
+    found_soft: dict[str, list[str]] = {}
+    for cat, keys in SOFT_SKILLS.items():
+        hits = sorted(wordset & keys)
+        if hits:
+            found_soft[cat] = hits
 
     sentiment = (pos - neg) / max(1, pos + neg) if (pos + neg) else 0.0
     return WordStats(
@@ -98,5 +139,6 @@ def analyze(text: str) -> WordStats:
         action_verbs=actions,
         sentiment=sentiment,
         vocab_richness=len(wordset) / n,
-        hard_skills=found,
+        hard_skills=found_hard,
+        soft_skills=found_soft,
     )

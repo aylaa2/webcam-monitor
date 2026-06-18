@@ -88,6 +88,17 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"[warn] whisper download skipped ({exc}); will fall back to Vosk/face-only.")
 
+    # AffectNet face-emotion model (HSEmotion, ONNX) — ensembled with the rules.
+    print("[get ] HSEmotion face-emotion model (AffectNet)")
+    try:
+        import urllib.request as _r  # noqa: F401  (ensures hsemotion's download works)
+        from hsemotion_onnx.facial_emotions import HSEmotionRecognizer
+
+        HSEmotionRecognizer(model_name="enet_b0_8_best_afew")
+        print("    done")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] HSEmotion skipped ({exc}); emotion will use rules only.")
+
     # Multilingual sentence-embedding model for the semantic STAR/topic classifier.
     print("[get ] embedding model (semantic STAR / topic classifier)")
     try:

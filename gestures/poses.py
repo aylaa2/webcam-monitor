@@ -11,7 +11,13 @@ compare it against these rules.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
+
+_MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "gesture_pose.joblib"
+_model = None
+_model_loaded = False
 
 # Pose name constants.
 OPEN_PALM = "OPEN_PALM"
@@ -24,15 +30,10 @@ PINCH = "PINCH"
 UNKNOWN = "UNKNOWN"
 
 WRIST = 0
-# (tip, pip-ish joint) per finger for the extension test.
-_FINGERS = {
-    "thumb": (4, 2),
-    "index": (8, 6),
-    "middle": (12, 10),
-    "ring": (16, 14),
-    "pinky": (20, 18),
-}
+# (tip, pip) per finger for the wrist-relative extension test.
+_FINGER_JOINTS = {"index": (8, 6), "middle": (12, 10), "ring": (16, 14), "pinky": (20, 18)}
 _PALM = [0, 5, 9, 13, 17]
+_MCPS = [5, 9, 13, 17]
 
 
 def palm_center(lm: np.ndarray) -> np.ndarray:
@@ -44,14 +45,24 @@ def hand_scale(lm: np.ndarray) -> float:
     return float(np.linalg.norm(lm[9, :2] - lm[0, :2]) + 1e-6)
 
 
-def fingers_extended(lm: np.ndarray, margin: float = 1.07) -> dict[str, bool]:
-    c = palm_center(lm)
-    out: dict[str, bool] = {}
-    for name, (tip, joint) in _FINGERS.items():
-        d_tip = np.linalg.norm(lm[tip, :2] - c)
-        d_joint = np.linalg.norm(lm[joint, :2] - c)
-        out[name] = d_tip > d_joint * margin
-    return out
+def _d(lm, a, b) -> float:
+    return float(np.linalg.norm(lm[a, :2] - lm[b, :2]))
+
+
+def finger_extended(lm: np.ndarray, tip: int, pip: int, margin: float = 1.05) -> bool:
+    """A finger is extended if its tip is farther from the WRIST than its PIP
+    joint. Wrist-relative distances are robust to hand rotation/orientation, which
+    the old palm-centre test was not (that's why the fist barely registered)."""
+    return _d(lm, tip, WRIST) > _d(lm, pip, WRIST) * margin
+
+
+def extended_count(lm: np.ndarray) -> int:
+    """How many of the four fingers (index..pinky) are extended (0=fist, 4=open)."""
+    return sum(finger_extended(lm, t, p) for t, p in _FINGER_JOINTS.values())
+
+
+def thumb_extended(lm: np.ndarray) -> bool:
+    return _d(lm, 4, WRIST) > _d(lm, 2, WRIST) * 1.10
 
 
 def pinch_distance(lm: np.ndarray) -> float:
@@ -59,29 +70,37 @@ def pinch_distance(lm: np.ndarray) -> float:
     return float(np.linalg.norm(lm[4, :2] - lm[8, :2]) / hand_scale(lm))
 
 
-def classify(lm: np.ndarray) -> str:
-    ext = fingers_extended(lm)
-    n = sum(ext.values())
+def _classify_geometric(lm: np.ndarray) -> str:
+    n = extended_count(lm)
+    idx = finger_extended(lm, 8, 6)
+    mid = finger_extended(lm, 12, 10)
+    ring = finger_extended(lm, 16, 14)
+    pky = finger_extended(lm, 20, 18)
+    th = thumb_extended(lm)
 
-    # Pinch: thumb + index tips touching while the index is still reaching out
-    # in front (tip farther from the palm than its PIP). Requiring "not buried"
-    # is what separates a pinch from a closed fist, where the index curls in.
+    # Pinch: thumb + index tips touching while the index isn't buried in the palm.
     c = palm_center(lm)
     index_buried = np.linalg.norm(lm[8, :2] - c) < np.linalg.norm(lm[6, :2] - c) * 0.95
-    if pinch_distance(lm) < 0.30 and not index_buried:
+    if pinch_distance(lm) < 0.32 and not index_buried and n <= 2:
         return PINCH
 
-    if n == 5:
-        return OPEN_PALM
+    # Thumbs up / down: fingers curled, thumb out, thumb tip clearly above/below
+    # the knuckles. Lenient on the finger count so it's easy to trigger.
+    if n <= 1 and th:
+        mcp_y = float(lm[_MCPS, 1].mean())
+        if lm[4, 1] < mcp_y - 0.04 and lm[4, 1] < lm[WRIST, 1]:
+            return THUMBS_UP
+        if lm[4, 1] > mcp_y + 0.04 and lm[4, 1] > lm[WRIST, 1]:
+            return THUMBS_DOWN
+
     if n == 0:
         return FIST
-    if ext["index"] and ext["middle"] and not ext["ring"] and not ext["pinky"]:
+    if n >= 4:
+        return OPEN_PALM
+    if idx and mid and not ring and not pky:
         return PEACE
-    if ext["index"] and not ext["middle"] and not ext["ring"] and not ext["pinky"]:
+    if idx and not mid and not ring and not pky:
         return POINT
-    if ext["thumb"] and not ext["index"] and not ext["middle"] and not ext["pinky"]:
-        # Thumb-only: up or down based on thumb tip vs wrist (image y grows down).
-        return THUMBS_UP if lm[4, 1] < lm[WRIST, 1] else THUMBS_DOWN
     return UNKNOWN
 
 
@@ -90,3 +109,32 @@ def landmark_vector(lm: np.ndarray) -> np.ndarray:
     centered = lm - lm[WRIST]
     centered = centered / hand_scale(lm)
     return centered.flatten().astype(np.float32)
+
+
+def _get_model():
+    """Lazily load a trained pose classifier (gestures/train_pose.py) if present."""
+    global _model, _model_loaded
+    if not _model_loaded:
+        _model_loaded = True
+        if _MODEL_PATH.exists():
+            try:
+                import joblib
+                _model = joblib.load(_MODEL_PATH)
+            except Exception:  # noqa: BLE001
+                _model = None
+    return _model
+
+
+def classify(lm: np.ndarray, min_conf: float = 0.6) -> str:
+    """Learned classifier (if a trained model exists) with a confidence gate,
+    otherwise the geometric rules. Train one with `python -m gestures.train_pose`."""
+    model = _get_model()
+    if model is not None:
+        try:
+            proba = model["pipeline"].predict_proba(landmark_vector(lm).reshape(1, -1))[0]
+            j = int(np.argmax(proba))
+            if proba[j] >= min_conf:
+                return model["labels"][j]
+        except Exception:  # noqa: BLE001
+            pass
+    return _classify_geometric(lm)

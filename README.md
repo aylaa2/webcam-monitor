@@ -6,8 +6,8 @@ Two real-time computer-vision systems that run **100% locally** on a laptop CPU 
 
 | Feature | What it does | Core technique (non-LLM) |
 |---|---|---|
-| **Interview analysis** | Calibrates to your face, records you (any length), then builds a clickable multimodal **HR report** — soft + hard skills (with the exact quotes behind each), **STAR-method** coverage, background & key concepts, how you felt, voice tone + full transcript — from **face + voice + words** | Face-mesh landmarks (+ baseline calibration, speech-aware emotion) · **DSP prosody** (autocorrelation pitch, energy, pauses) · **multilingual offline ASR** (Whisper, Romanian + English) + lexicon/STAR analysis · HMM smoothing · transparent weighted fusion |
-| **Gesture control** | Hand gestures trigger macOS actions (open palm → fist closes the window, ✌️ = screenshot, swipe = slides, etc.) | Hand landmarks → geometric pose rules → **finite-state machine** with a refractory lock → real OS actions |
+| **Interview analysis** | Calibrates to your face, records you (any length), then builds a clickable multimodal **HR report** — every **hard + soft skill you mentioned** (with the exact quotes), background, key concepts, how you felt, voice tone + full transcript — from **face + voice + words** | **AffectNet face-emotion model (HSEmotion) ensembled with blendshape rules** (+ calibration, speech-aware) · **DSP prosody** · **multilingual offline ASR** (Whisper) · **multilingual embedding classifier** for skills/background + **semantic keyphrases (MMR)** · HMM smoothing · transparent fusion |
+| **Gesture control** | Hand gestures drive macOS — **finger-controlled cursor with dwell-click**, open palm→fist closes the window, finger-circle = volume, ✌️ = screenshot, etc. | Hand landmarks → wrist-relative pose rules → **finite-state machine** (refractory lock) + dwell-click controller → real OS actions |
 
 Everything below the landmark detector is transparent math you can point at and
 explain — which is the whole pedagogical point.
@@ -22,16 +22,22 @@ explain — which is the whole pedagogical point.
   classifier (sentiment) and a *temporal* deterministic recognizer (gestures).
 - **Explainable by construction.** Every decision traces back to specific
   landmarks, angles, and weights — the opposite of a black box.
-- **A built-in experiment.** The same emotion task is solved three ways with
+- **A built-in experiment.** The same emotion task is solved several ways with
   increasing model complexity, so you can compare accuracy *and* interpretability:
   1. **Rule baseline** — weighted sums of 52 facial *blendshapes* (zero training).
   2. **Classic ML** — geometric features + **SVM (RBF)** vs **RandomForest**.
-  3. **Deep learning** — a small **CNN** trained on FER2013 (optional).
+  3. **Deep learning** — a small **CNN** trained on FER2013 (optional), or the
+     bundled **AffectNet model (HSEmotion)** which is the default, **ensembled**
+     (late-fusion) with the rules.
+- **Measurable accuracy + an honest negative result.** Trainers print cross-val
+  accuracy + confusion matrices; and a tried-but-rejected cross-encoder reranker
+  (kept behind `CLASSIFY_RERANK=1`) that did *not* beat the bi-encoder on this
+  task — a real empirical comparison rather than hand-waving.
 - **Classic probabilistic + automata theory.** A **Hidden-Markov-style filter**
   steadies the emotion signal; a **finite-state machine** parses gesture grammar.
 - **Multimodal fusion without an LLM.** The HR report combines three independent
   signal streams — face (vision), voice tone (DSP), and words (offline ASR +
-  lexicons + STAR/keyword rules) — into explainable, *evidence-linked* scores
+  lexicons + keyword rules) — into explainable, *evidence-linked* scores
   (click any score to see the quotes behind it). Speech is transcribed by an
   offline **ASR** model (Whisper/Vosk), and all the *analysis* on top of the
   transcript is transparent rule/lexicon logic — no language model.
@@ -108,28 +114,31 @@ window (HR analysis):
    while it calibrates to you, then speak/react naturally (the mic records too).
 2. Click **Stop** / press **q** to end the recording — the **Interview Report**
    window opens with a full **HR analysis** built from **face + voice + words**:
-   - **soft skills** (communication, confidence, composure, enthusiasm,
-     positivity, engagement) as scored bars
-   - **hard skills** — technical keywords you actually mentioned
-   - **STAR method** coverage (Situation / Task / Action / Result) — detected
-     **semantically** by a multilingual sentence-embedding classifier, not keywords
-   - **topics discussed**, **key concepts**, and **background** highlights — the
-     classifier tags each thing you said as a STAR part, background, or a
-     soft/hard-skill topic (works in Romanian and English)
+   - **soft-skill scores** (communication, confidence, composure, enthusiasm,
+     positivity, engagement) as bars
+   - **all hard + soft skills you mentioned** — detected **semantically** by a
+     multilingual embedding classifier (works in Romanian + English) *and* a
+     keyword backup, so nothing is missed
+   - **background** highlights + **key concepts** (semantic keyphrases)
    - **voice & speech** metrics (pace/WPM, filler words, pitch, energy, pauses)
-   - **how you felt** + **peak emotional moments** + the emotion graph
+   - **how you felt** + **peak emotional moments** (with **the exact line you said**
+     at each peak) + the emotion graph
+   - an **interview-integrity** heuristic — flags signals like frequent look-away,
+     consistent off-screen gaze, scripted delivery, or a second face (clearly
+     labelled *heuristic, not proof of cheating*)
    - a written **HR recommendation** with watch-outs
-3. **Click any skill, STAR, "Background", or "Full transcript"** in the report
+3. **Click any skill, "Background", or "Full transcript"** in the report
    (look for `more >`) to open a detail window showing **the exact sentences you
-   said** (with timestamps) behind that score.
+   said** (with timestamps) behind it.
 4. The app stays open — **Start another recording** any time. **ESC** / **Quit**
    exits. Each session also saves a PNG + TXT in `./reports`.
 
-> **Languages:** speech is transcribed by **Whisper (medium)** offline, which
-> auto-detects the language — **Romanian (with diacritics) and English both work**
-> (and ~97 others). Override the model with `WHISPER_MODEL=large-v3` (most
-> accurate) or `=small` (fastest). **Recording length:** unlimited in practice
-> (audio ~4 MB/min in RAM). No mic or speech model? The interview runs face-only.
+> **Languages:** speech is transcribed by **Whisper (medium)** offline. Auto-detect
+> is **constrained to English + Romanian** (so it won't drift to other languages),
+> and you can lock it: press **`l`** in the window to cycle AUTO / English / Romanian,
+> pass **`--lang en`**, or set `INTERVIEW_LANG=en`. Override the model with
+> `WHISPER_MODEL=large-v3` (most accurate) or `=small` (fastest). **Recording
+> length:** unlimited in practice. No mic or speech model? The interview runs face-only.
 
 ### Gesture Control
 
@@ -140,9 +149,10 @@ A **"Gesture Control"** window (live hands + gesture legend) plus a separate
 
 | Gesture | Action |
 |---|---|
+| ☝️ point your index finger | Move the mouse cursor |
+| ☝️⏸ hold the cursor still ~2.5 s (after moving it) | Left click |
 | ✊ open palm → close to a fist | Close window (Cmd+W) |
-| 👉 / ✋ swipe right / left | Next / previous slide (→ / ←) |
-| ✋ swipe up / down | Volume up / down |
+| ☝️🔄 draw a circle with your index finger | Volume up (clockwise) / down (counter-clockwise) |
 | 🤏 pinch (thumb+index) | Mission Control |
 | 👍 thumbs up | Play / Pause |
 | 👎 thumbs down | Mute |
@@ -165,6 +175,18 @@ python app.py interview              # now uses your trained SVM automatically
 `train_svm.py` prints **RandomForest feature importances** — e.g. how much
 `smile`, `brow_raise`, or `gaze` each contribute — a ready-made interpretability
 slide.
+
+### Train the learned hand-pose classifier (replaces the geometric thresholds)
+
+```bash
+python -m gestures.collect_data      # press 1-7 to label hand poses from the webcam
+python -m gestures.train_pose        # RandomForest, CV accuracy + confusion matrix
+python app.py gestures               # poses.classify now uses your trained model
+```
+
+Without a trained model the gestures use the geometric rules (unchanged); once
+trained, `poses.classify` switches to the learned classifier with a confidence
+gate and falls back to geometry when unsure.
 
 ## Optional: the CNN comparison
 
@@ -189,11 +211,13 @@ vision/                 shared core: camera, face/hand trackers, drawing
 sentiment/              Feature 1
   features.py           EAR, smile, gaze, head pose, speaking detector
   blendshape_emotion.py rule baseline (speech-aware) + valence/arousal
+  emotion_model.py      AffectNet face model (HSEmotion) + late-fusion ensemble
   calibration.py        per-person neutral baseline
   classifier.py         SVM/RandomForest wrapper
   temporal.py           HMM-style emotion filter
-  fusion.py             engagement score
+  fusion.py             engagement score (head + gaze eye-contact)
   report.py             emotion description + graph + window image
+  integrity.py          heuristic interview-integrity signals (gaze/delivery/2nd face)
   hr.py                 multimodal HR report (soft/hard skills, fusion)
   run_interview.py      the recording-studio loop
   collect_data.py  train_svm.py  cnn_fer.py  train_cnn.py
@@ -202,12 +226,15 @@ audio/                  voice + words (Feature 1)
   capture.py            background mic recording
   transcribe.py         offline ASR — Whisper (multilingual) + Vosk fallback
   lexicon.py            fillers, sentiment, action verbs, hard-skill keywords
-  nlp.py                STAR cues, background + key-concept extraction (fallback)
-  classify.py           multilingual embedding classifier (STAR / topic / background)
+  nlp.py                background + key-concept extraction (lexicon fallback)
+  classify.py           multilingual classifier (hard/soft skills, background) + keyphrases
 gestures/               Feature 2
-  poses.py              static pose geometry
-  state_machine.py      dynamic gesture FSM
+  poses.py              static pose: learned classifier (if trained) or geometry
+  state_machine.py      dynamic gesture FSM (grab, finger-circle volume, etc.)
+  cursor.py             finger-controlled mouse + dwell-to-click
   actions.py            macOS action mapping
+  collect_data.py       record labeled pose samples
+  train_pose.py         train + evaluate the learned pose classifier
   run_gestures.py       the live loop
 ```
 

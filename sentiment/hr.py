@@ -17,7 +17,6 @@ import numpy as np
 
 from audio import classify, nlp
 from audio.lexicon import FILLERS, NEGATIVE, POSITIVE, WordStats
-from audio.nlp import STAR_CUES
 from audio.prosody import ProsodyFeatures
 from sentiment.report import _wrap, fmt_time
 
@@ -71,10 +70,10 @@ class HRReport:
     emotion_moments: list = field(default_factory=list)
     background: list = field(default_factory=list)
     key_concepts: list = field(default_factory=list)
-    star: nlp.Star = field(default_factory=nlp.Star)
-    star_quotes: dict = field(default_factory=dict)
-    topics: list = field(default_factory=list)
+    hard_topics: list = field(default_factory=list)
+    soft_topics: list = field(default_factory=list)
     evidence: dict[str, Evidence] = field(default_factory=dict)
+    integrity: object = None
     classified: bool = False
     voice_available: bool = False
     words_available: bool = False
@@ -177,55 +176,86 @@ def compute(face: dict, prosody: ProsodyFeatures, words: WordStats, duration_s: 
         "Engagement", soft["Engagement"],
         [f"engagement: {engagement * 100:.0f}", f"eye contact: {eye * 100:.0f}%",
          f"voiced ratio: {voiced * 100:.0f}%" if voice else ""],
-        segs[:3] and [(s.start, s.text) for s in segs[:3]] or [])
-    for cat, kws in words.hard_skills.items():
-        ev[f"hard:{cat}"] = Evidence(cat, None, [f"mentioned: {', '.join(kws)}"],
-                                     nlp.find_quotes(segs, set(kws)))
+        [])
+
+    # These six are scored mainly from voice + face DELIVERY (eye contact, voice
+    # steadiness, blink rate, fillers), not specific words — so when there are no
+    # word-based quotes, show a couple of representative spoken lines for context
+    # and say so, instead of leaving "What was said" empty.
+    rep = [(s.start, s.text) for s in sorted(segs, key=lambda s: -len(s.text))[:2]]
+    for name in SOFT_ORDER:
+        e = ev.get(name)
+        if e and not e.quotes:
+            e.quotes = rep
+            e.basis = e.basis + ["(scored from voice & face delivery; lines below "
+                                 "are representative, not the cause)"]
     for e in ev.values():
         e.basis = [b for b in e.basis if b]
 
-    # ---- semantic classification (multilingual) + lexicon fallback ----
-    star = nlp.detect_star(transcript)
-    star_quotes: dict[str, list] = {}
-    bg = nlp.background(segs)
-    topics: list = []
+    # ---- skills mentioned + background: semantic classifier + keyword backup ----
     cls = classify.classify(segs)
-    if cls:
-        for comp in ("Situation", "Task", "Action", "Result"):
-            star.present[comp] = star.present.get(comp, False) or cls.star_present.get(comp, False)
-        star_quotes = {k: list(v) for k, v in cls.star_quotes.items()}
-        bg = cls.background + bg
-        for disp, kind, quotes in cls.topics:
-            topics.append((disp, kind))
-            ev[f"topic:{disp}"] = Evidence(disp, None,
-                                          [f"{kind.lower()} topic - {len(quotes)} mention(s)"],
-                                          quotes[:5])
-
-    for comp in ("Situation", "Task", "Action", "Result"):
-        q = list(star_quotes.get(comp, []))
-        if len(q) < 2:
-            q += nlp.find_phrase_quotes(segs, STAR_CUES.get(comp, set()), 3)
-        seen, dq = set(), []
-        for t, x in q:
-            if x not in seen:
-                seen.add(x)
-                dq.append((t, x))
-        star_quotes[comp] = dq[:4]
-
+    background = list(cls.background) if cls is not None else nlp.background(segs)
     seen, bg2 = set(), []
-    for t, x in bg:
+    for t, x in background:
         if x not in seen:
             seen.add(x)
             bg2.append((t, x))
 
+    # Register ALL hard + soft skills said: semantic topics UNION keyword hits.
+    hard_mentioned: dict[str, list] = {}
+    soft_mentioned: dict[str, list] = {}
+    if cls is not None:
+        for disp, kind, quotes in cls.topics:
+            (hard_mentioned if kind == "Hard" else soft_mentioned)[disp] = list(quotes)
+    for cat, kws in words.hard_skills.items():
+        hard_mentioned.setdefault(cat, nlp.find_quotes(segs, set(kws)))
+    for cat, kws in words.soft_skills.items():
+        soft_mentioned.setdefault(cat, nlp.find_quotes(segs, set(kws)))
+
+    def _add_skill_evidence(mentioned, keyword_map):
+        for disp, quotes in mentioned.items():
+            kws = keyword_map.get(disp)
+            basis = [f"keywords: {', '.join(kws)}"] if kws else ["discussed semantically"]
+            ev[f"topic:{disp}"] = Evidence(disp, None, basis, quotes[:6])
+
+    _add_skill_evidence(hard_mentioned, words.hard_skills)
+    _add_skill_evidence(soft_mentioned, words.soft_skills)
+    hard_topics = sorted(hard_mentioned, key=lambda d: -len(hard_mentioned[d]))
+    soft_topics = sorted(soft_mentioned, key=lambda d: -len(soft_mentioned[d]))
+
+    kc = classify.keyphrases(transcript)               # semantic (KeyBERT-style + MMR)
+    if kc is None:
+        kc = nlp.key_concepts(transcript, words.hard_skills)   # frequency fallback
+
     report = HRReport(
         soft=soft, hard_skills=words.hard_skills, metrics=metrics, transcript=transcript,
         segments=segs, language=language, engine=engine,
-        background=bg2[:6], key_concepts=nlp.key_concepts(transcript, words.hard_skills),
-        star=star, star_quotes=star_quotes, topics=topics, classified=cls is not None,
-        evidence=ev, voice_available=voice, words_available=has_words)
+        background=bg2[:8], key_concepts=kc,
+        hard_topics=hard_topics, soft_topics=soft_topics,
+        classified=cls is not None, evidence=ev,
+        voice_available=voice, words_available=has_words)
     report.narrative = _narrative(report, face, duration_s)
     return report
+
+
+def attach_quotes(moments, segments):
+    """For each peak emotional moment (t, emotion, intensity), attach the line
+    that was being said at that time, so the interviewer sees what happened."""
+    out = []
+    for t, emo, v in moments:
+        quote = ""
+        best = None
+        for s in segments:
+            if s.start <= t <= s.end:
+                quote = s.text
+                break
+            d = abs((s.start + s.end) / 2 - t)
+            if best is None or d < best[0]:
+                best = (d, s.text)
+        if not quote and best is not None and best[0] <= 4.0:
+            quote = best[1]
+        out.append((t, emo, v, quote))
+    return out
 
 
 def _narrative(r: HRReport, face: dict, duration_s: float) -> str:
@@ -256,12 +286,10 @@ def _narrative(r: HRReport, face: dict, duration_s: float) -> str:
         flags.append("monotone delivery")
     if flags:
         parts.append("Watch-outs: " + ", ".join(flags) + ".")
-    star_present = [k for k, v in r.star.present.items() if v]
-    if r.words_available:
-        parts.append(f"STAR coverage: {len(star_present)}/4 "
-                     f"({', '.join(star_present) if star_present else 'none detected'}).")
-    if r.hard_skills:
-        parts.append("Technical areas: " + ", ".join(r.hard_skills) + ".")
+    if r.hard_topics:
+        parts.append("Hard skills: " + ", ".join(r.hard_topics) + ".")
+    if r.soft_topics:
+        parts.append("Soft skills shown: " + ", ".join(r.soft_topics) + ".")
     parts.append(f"Dominant facial affect: '{face.get('dominant_emotion', 'neutral')}'.")
     if not r.voice_available:
         parts.append("(Voice unavailable — scores are face-only.)")
@@ -330,25 +358,35 @@ def render_image(r: HRReport, face: dict, graph_path=None):
     if not r.voice_available and not r.words_available:
         t.put("voice/words unavailable (no mic or model)", 8, y, _DIM, 0.5)
         y += 22
-    y += 8
-    t.put("STAR METHOD", 4, y, _ACC, 0.55, True)
-    t.put("more >", Lw - 74, y, _HOT, 0.42)
-    Lb.append((0, y - 18, Lw, y + 10, "section:star"))
-    y += 26
-    sx = 8
-    for comp in ("Situation", "Task", "Action", "Result"):
-        ok = r.star.present.get(comp, False)
-        t.put(f"{'[x]' if ok else '[ ]'} {comp}", sx, y, _ACC if ok else (90, 90, 230), 0.5)
-        sx += 170
-    y += 6
-    tag = "  (semantic + cues)" if r.classified else ""
-    t.put(f"coverage {sum(r.star.present.values())}/4{tag}", 8, y + 14, _DIM, 0.45)
-    y += 32
+    y += 10
     t.put("RECOMMENDATION", 4, y, _ACC, 0.55, True)
     y += 24
     for ln in _wrap(r.narrative, 80):
         t.put(ln, 8, y, _FG, 0.46)
         y += 20
+
+    ig = r.integrity
+    if ig is not None:
+        from sentiment.integrity import DISCLAIMER
+        y += 12
+        col = (90, 90, 230) if ig.score >= 60 else (90, 160, 230) if ig.score >= 30 else _ACC
+        t.put("INTERVIEW INTEGRITY  (heuristic)", 4, y, _ACC, 0.55, True)
+        y += 22
+        t.put(f"signal score: {ig.score:.0f}/100  -  {ig.label}", 8, y, col, 0.5)
+        y += 20
+        if ig.flags:
+            for _short, detail in ig.flags:
+                for ln in _wrap(f"- {detail}", 82):
+                    t.put(ln, 8, y, _FG, 0.44)
+                    y += 17
+        else:
+            t.put("- no notable signals", 8, y, _DIM, 0.45)
+            y += 17
+        y += 4
+        for ln in _wrap(DISCLAIMER, 86):
+            t.put(ln, 8, y, _DIM, 0.4)
+            y += 15
+
     Lh = y + pad
     L = t.render(L)[:Lh]
 
@@ -374,34 +412,39 @@ def render_image(r: HRReport, face: dict, graph_path=None):
             y += 19
         y += 8
     if r.emotion_moments:
-        t.put("PEAK EMOTIONAL MOMENTS", 4, y, _ACC, 0.55, True)
+        t.put("PEAK EMOTIONAL MOMENTS   (what was said)", 4, y, _ACC, 0.5)
         y += 24
-        for tm, emo, v in r.emotion_moments:
-            t.put(f"{fmt_time(tm):>6}   {emo:<10} {v * 100:3.0f}%", 8, y, _HOT, 0.5)
-            y += 20
-        y += 8
-    if r.topics:
-        t.put("TOPICS DISCUSSED   (click for what was said)", 4, y, _ACC, 0.5)
+        for m in r.emotion_moments:
+            tm, emo, v = m[0], m[1], m[2]
+            quote = m[3] if len(m) > 3 else ""
+            t.put(f"{fmt_time(tm)}   {emo}  {v * 100:.0f}%", 8, y, _HOT, 0.5)
+            y += 19
+            if quote:
+                for ln in _wrap(f'"{quote}"', 82):
+                    t.put("   " + ln, 8, y, _FG, 0.44)
+                    y += 17
+            y += 4
+        y += 6
+    def skill_section(header, items):
+        nonlocal y
+        t.put(header, 4, y, _ACC, 0.5)
         y += 24
-        for disp, kind in r.topics:
-            t.put(f"[{kind}] {disp}", 8, y, _HOT, 0.5)
+        if not items:
+            t.put("none detected", 8, y, _DIM, 0.5)
+            y += 22
+            return
+        for disp in items:
+            t.put(disp, 8, y, _HOT, 0.5)
+            ev = r.evidence.get(f"topic:{disp}")
+            if ev and ev.basis:
+                t.put(ev.basis[0][:48], 210, y, _FG, 0.45)
             t.put("more >", Rw - 74, y, _HOT, 0.42)
             Rb.append((0, y - 16, Rw, y + 8, f"topic:{disp}"))
             y += 22
         y += 8
-    t.put("HARD SKILLS (keywords)   (click for quotes)", 4, y, _ACC, 0.5)
-    y += 24
-    if r.hard_skills:
-        for cat, kws in r.hard_skills.items():
-            t.put(cat, 8, y, _HOT, 0.5)
-            t.put(", ".join(kws)[:55], 210, y, _FG, 0.46)
-            t.put("more >", Rw - 74, y, _HOT, 0.42)
-            Rb.append((0, y - 16, Rw, y + 8, f"hard:{cat}"))
-            y += 22
-    else:
-        t.put("none detected", 8, y, _DIM, 0.5)
-        y += 22
-    y += 8
+
+    skill_section("HARD SKILLS MENTIONED   (click for quotes)", r.hard_topics)
+    skill_section("SOFT SKILLS MENTIONED   (click for quotes)", r.soft_topics)
     if r.key_concepts:
         t.put("KEY CONCEPTS", 4, y, _ACC, 0.55, True)
         y += 24
@@ -468,7 +511,7 @@ def render_detail(r: HRReport, key: str, width: int = 940) -> np.ndarray:
                 y[0] += 19
             y[0] += 6
 
-    if key.startswith(("soft:", "hard:", "topic:")):
+    if key.startswith(("soft:", "topic:")):
         ev = r.evidence.get(key[5:] if key.startswith("soft:") else key)
         if ev is None:
             title("No detail")
@@ -485,15 +528,6 @@ def render_detail(r: HRReport, key: str, width: int = 940) -> np.ndarray:
             t.put("What was said:", 24, y[0], _ACC, 0.55, True)
             y[0] += 26
             quotes(ev.quotes)
-    elif key == "section:star":
-        title("STAR method breakdown")
-        for comp in ("Situation", "Task", "Action", "Result"):
-            ok = r.star.present.get(comp, False)
-            t.put(f"{'[x]' if ok else '[ ]'} {comp}", 24, y[0],
-                  _ACC if ok else (90, 90, 230), 0.6, True)
-            y[0] += 26
-            quotes(r.star_quotes.get(comp, []))
-            y[0] += 6
     elif key == "section:background":
         title("Background & experience mentioned")
         quotes(r.background)

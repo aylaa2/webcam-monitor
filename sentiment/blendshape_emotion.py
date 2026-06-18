@@ -44,8 +44,8 @@ def predict(bs: dict[str, float], speaking: float = 0.0) -> tuple[dict[str, floa
 
     scores = {
         "happy": 1.3 * smile + 0.4 * cheek_squint,
-        # surprise must co-activate eyes + brows, not just an open jaw
-        "surprise": 0.25 * jaw_eff + 1.0 * eye_wide + 0.7 * brow_outer + 0.4 * brow_inner,
+        # surprise = wide eyes + raised brows (more sensitive); jaw alone won't do it
+        "surprise": 0.30 * jaw_eff + 1.4 * eye_wide + 1.0 * brow_outer + 0.6 * brow_inner,
         "sad": 1.0 * frown + 0.6 * brow_inner + 0.3 * mouth_lower,
         "angry": 1.0 * brow_down + 0.6 * mouth_press + 0.4 * eye_squint + 0.3 * sneer,
         "fear": 0.9 * eye_wide + 0.7 * brow_inner + 0.5 * mouth_stretch + 0.2 * jaw_eff,

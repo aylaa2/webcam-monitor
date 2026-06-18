@@ -17,6 +17,7 @@ rules in audio/nlp.py.
 """
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,13 +61,13 @@ TOPIC_PROTOS: list[tuple[str, str, str, list[str]]] = [
      ["programming languages and writing software code, python java c++"]),
     ("hard:data_ml", "Hard", "Data / ML",
      ["machine learning, data analysis, statistics and artificial intelligence"]),
-    ("hard:web", "Hard", "Web development",
+    ("hard:web", "Hard", "Web / Frontend",
      ["web development, frontend, backend, react and APIs"]),
     ("hard:cloud", "Hard", "Cloud / DevOps",
      ["cloud computing, deployment, docker, kubernetes and devops"]),
     ("hard:databases", "Hard", "Databases",
      ["databases, SQL queries and data storage"]),
-    ("hard:design", "Hard", "Design / UX",
+    ("hard:design", "Hard", "Design",
      ["design, user interface, user experience and prototyping"]),
     ("other", "Other", "Other", ["greetings, thanks, small talk and unrelated chit chat"]),
 ]
@@ -124,8 +125,8 @@ def _embed(texts: list[str]) -> np.ndarray:
     return e / (np.linalg.norm(e, axis=1, keepdims=True) + 1e-9)
 
 
-def classify(segments) -> Classification | None:
-    if not segments or not _load():
+def _classify_embed(segments) -> Classification | None:
+    if not _load():
         return None
     embs = _embed([s.text for s in segments])
     star_sims = embs @ _star_mat.T
@@ -157,3 +158,151 @@ def classify(segments) -> Classification | None:
                     key=lambda t: -len(t[2]))
     return Classification(star_present=star_present, star_quotes=dict(star_quotes),
                           background=background, topics=topics)
+
+
+def keyphrases(text: str, top: int = 10, diversity: float = 0.65
+               ) -> list[tuple[str, int]] | None:
+    """Semantic key-concept extraction (KeyBERT-style + MMR).
+
+    Candidates are uni/bi/tri-grams of content words; they're ranked by cosine
+    similarity of their embedding to the whole-document embedding, then selected
+    with Maximal Marginal Relevance so the list is precise AND non-redundant.
+    Domain terms (known skill keywords) and multi-word phrases get a small boost.
+    None if the embedding model is unavailable (callers fall back to frequency)."""
+    if not _load():
+        return None
+    from collections import Counter
+
+    from audio.lexicon import HARD_SKILLS, tokenize
+    from audio.nlp import STOPWORDS
+
+    toks = tokenize(text)
+    content = [w for w in toks if len(w) > 2 and w not in STOPWORDS]
+    cands: set[str] = set(content)
+    for a, b in zip(toks, toks[1:]):
+        if len(a) > 2 and len(b) > 2 and a not in STOPWORDS and b not in STOPWORDS:
+            cands.add(f"{a} {b}")
+    for a, b, c in zip(toks, toks[1:], toks[2:]):           # trigrams
+        if all(len(w) > 2 for w in (a, c)) and a not in STOPWORDS and c not in STOPWORDS:
+            cands.add(f"{a} {b} {c}")
+    cands = [c for c in cands if not c.isdigit()]
+    if not cands:
+        return []
+
+    counts = Counter(content)
+    domain = {kw for kws in HARD_SKILLS.values() for kw in kws}
+    doc = _embed([text])[0]
+    cand_emb = _embed(cands)
+    rel = cand_emb @ doc
+    boost = np.array([(0.05 if any(w in domain for w in c.split()) else 0.0)
+                      + (0.02 if " " in c else 0.0) for c in cands], dtype=np.float32)
+    score = rel + boost
+
+    selected: list[int] = []
+    remaining = list(range(len(cands)))
+    while remaining and len(selected) < top:
+        if not selected:
+            i = max(remaining, key=lambda k: score[k])
+        else:
+            def mmr(k):
+                sim = max(float(cand_emb[k] @ cand_emb[j]) for j in selected)
+                return diversity * score[k] - (1 - diversity) * sim
+            i = max(remaining, key=mmr)
+        remaining.remove(i)
+        p = cands[i]
+        if any(p in cands[j] or cands[j] in p for j in selected):  # sub/superstring dedup
+            continue
+        selected.append(i)
+
+    out = []
+    for i in selected:
+        p = cands[i]
+        cnt = max(1, text.lower().count(p)) if " " in p else counts.get(p, 1)
+        out.append((p, int(cnt)))
+    return out
+
+
+# -------------------- cross-encoder reranker path (opt-in via CLASSIFY_RERANK=1) ------
+RERANK_MODEL = "jinaai/jina-reranker-v2-base-multilingual"
+STAR_MARGIN = 0.5
+TOPIC_MARGIN = 0.5
+
+_rerank = None
+_rerank_unavail = False
+
+
+def _load_rerank() -> bool:
+    global _rerank, _rerank_unavail
+    if _rerank is not None:
+        return True
+    if _rerank_unavail:
+        return False
+    try:
+        from fastembed.rerank.cross_encoder import TextCrossEncoder
+        _rerank = TextCrossEncoder(model_name=RERANK_MODEL, cache_dir=str(CACHE_DIR))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[classify] cross-encoder unavailable: {exc}")
+        _rerank_unavail = True
+        return False
+
+
+def _classify_rerank(segments) -> Classification:
+    star_docs = [" ".join(p) for _, p in STAR_PROTOS]
+    topic_docs = [" ".join(p) for *_, p in TOPIC_PROTOS]
+    all_docs = star_docs + topic_docs
+    n_star = len(star_docs)
+    star_idx_other = [i for i, (k, _) in enumerate(STAR_PROTOS) if k == "_other"][0]
+    topic_idx_other = [i for i, (k, *_2) in enumerate(TOPIC_PROTOS) if k == "other"][0]
+
+    star_present = {c: False for c in ("Situation", "Task", "Action", "Result")}
+    star_quotes: dict[str, list] = defaultdict(list)
+    background: list = []
+    topic_q: dict[str, list] = defaultdict(list)
+    topic_kind: dict[str, str] = {}
+
+    for s in segments:
+        scores = np.array(list(_rerank.rerank(s.text, all_docs)), dtype=np.float32)
+        ss, st = scores[:n_star], scores[n_star:]
+        quote = (s.start, s.text)
+
+        best_j, best_v = -1, -1e9
+        for i, (k, _) in enumerate(STAR_PROTOS):
+            if k != "_other" and ss[i] > best_v:
+                best_v, best_j = ss[i], i
+        if best_v - ss[star_idx_other] > STAR_MARGIN:
+            comp = STAR_PROTOS[best_j][0]
+            star_present[comp] = True
+            star_quotes[comp].append(quote)
+
+        best_k, best_tv = -1, -1e9
+        for i, (k, *_2) in enumerate(TOPIC_PROTOS):
+            if k != "other" and st[i] > best_tv:
+                best_tv, best_k = st[i], i
+        if best_tv - st[topic_idx_other] > TOPIC_MARGIN:
+            key, kind, disp, _ = TOPIC_PROTOS[best_k]
+            if kind == "Background":
+                background.append(quote)
+            else:
+                topic_q[disp].append(quote)
+                topic_kind[disp] = kind
+
+    topics = sorted(((d, topic_kind[d], q) for d, q in topic_q.items()),
+                    key=lambda t: -len(t[2]))
+    return Classification(star_present=star_present, star_quotes=dict(star_quotes),
+                          background=background, topics=topics)
+
+
+def classify(segments) -> Classification | None:
+    """Bi-encoder embeddings by default (empirically best on this prototype-based
+    multi-class task). The cross-encoder reranker is available as an opt-in
+    experiment via CLASSIFY_RERANK=1 (it needs prototype/threshold tuning to win
+    here, so it is off by default)."""
+    if not segments:
+        return None
+    if os.environ.get("CLASSIFY_RERANK") == "1" and _load_rerank():
+        try:
+            return _classify_rerank(segments)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[classify] reranker failed ({exc}); falling back to embeddings.")
+    return _classify_embed(segments)

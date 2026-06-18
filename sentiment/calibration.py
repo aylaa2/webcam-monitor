@@ -21,14 +21,19 @@ class BaselineCalibrator:
         self._bs_sum: dict[str, float] = {}
         self._yaw: list[float] = []
         self._pitch: list[float] = []
+        self._gx: list[float] = []
+        self._gy: list[float] = []
         self._n = 0
         self._t0: float | None = None
         self.baseline_bs: dict[str, float] = {}
         self.base_yaw = 0.0
         self.base_pitch = 0.0
+        self.base_gaze_x = 0.0
+        self.base_gaze_y = 0.0
         self.done = False
 
-    def update(self, blendshapes: dict[str, float], yaw: float, pitch: float) -> None:
+    def update(self, blendshapes: dict[str, float], yaw: float, pitch: float,
+               gaze_x: float = 0.0, gaze_y: float = 0.0) -> None:
         if self.done:
             return
         now = time.monotonic()
@@ -38,6 +43,8 @@ class BaselineCalibrator:
             self._bs_sum[k] = self._bs_sum.get(k, 0.0) + v
         self._yaw.append(yaw)
         self._pitch.append(pitch)
+        self._gx.append(gaze_x)
+        self._gy.append(gaze_y)
         self._n += 1
         if now - self._t0 >= self.seconds and self._n >= self.min_frames:
             self._finish()
@@ -47,6 +54,8 @@ class BaselineCalibrator:
             self.baseline_bs = {k: v / self._n for k, v in self._bs_sum.items()}
             self.base_yaw = float(np.median(self._yaw))
             self.base_pitch = float(np.median(self._pitch))
+            self.base_gaze_x = float(np.median(self._gx))
+            self.base_gaze_y = float(np.median(self._gy))
         self.done = True
 
     def remaining(self) -> float:

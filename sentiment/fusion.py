@@ -35,8 +35,11 @@ def _gauss(x: float, sigma: float) -> float:
 
 
 def compute(feat: FaceFeatures, valence: float, blink_rate: float) -> Engagement:
-    facing = _gauss(feat.yaw, 25.0) * _gauss(feat.pitch, 20.0)
-    eye_contact = _gauss(feat.gaze_x, 0.4) * _gauss(feat.gaze_y, 0.5)
+    facing = _gauss(feat.yaw, 18.0) * _gauss(feat.pitch, 18.0)
+    gaze = _gauss(feat.gaze_x, 0.30) * _gauss(feat.gaze_y, 0.35)
+    # Real eye contact needs BOTH the head pointed at the camera AND the gaze
+    # centered, so glancing away (by moving the eyes OR turning the head) drops it.
+    eye_contact = facing * gaze
     positivity = (valence + 1.0) / 2.0
     composure = 1.0 - min(1.0, max(0.0, (blink_rate - 25.0) / 40.0))
 

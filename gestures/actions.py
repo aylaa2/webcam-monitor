@@ -35,12 +35,10 @@ class ActionController:
         self.dry_run = dry_run
         self._map = {
             sm.GRAB: ("Close window  (Cmd+W)", lambda: pyautogui.hotkey("command", "w")),
-            sm.SWIPE_RIGHT: ("Next slide  (->)", lambda: pyautogui.press("right")),
-            sm.SWIPE_LEFT: ("Previous slide  (<-)", lambda: pyautogui.press("left")),
-            sm.SWIPE_UP: ("Volume up", lambda: self._volume(+12)),
-            sm.SWIPE_DOWN: ("Volume down", lambda: self._volume(-12)),
+            sm.ROTATE_RIGHT: ("Volume up", lambda: self._volume(+8)),
+            sm.ROTATE_LEFT: ("Volume down", lambda: self._volume(-8)),
             sm.PINCH: ("Mission Control", lambda: pyautogui.hotkey("ctrl", "up")),
-            sm.THUMBS_UP: ("Play / Pause", lambda: pyautogui.press("playpause")),
+            sm.THUMBS_UP: ("Play / Pause", self._playpause),
             sm.THUMBS_DOWN: ("Mute toggle", self._mute),
             sm.PEACE: ("Screenshot", self._screenshot),
             "SWITCH": ("Switch app  (Cmd+Tab)", lambda: pyautogui.hotkey("command", "tab")),
@@ -75,6 +73,11 @@ class ActionController:
 
     def _mute(self) -> None:
         _osa("set volume output muted (not (output muted of (get volume settings)))")
+
+    def _playpause(self) -> None:
+        # The macOS media play/pause key drives the active "now playing" app
+        # (YouTube/Chrome registers one), which is the most reliable cross-app way.
+        pyautogui.press("playpause")
 
     def _screenshot(self) -> None:
         out = SHOTS_DIR / f"gesture_{time.strftime('%Y%m%d_%H%M%S')}.png"

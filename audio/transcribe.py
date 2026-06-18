@@ -18,6 +18,9 @@ WHISPER_DIR = _MODELS / "whisper"
 VOSK_DIR = _MODELS / "vosk-model-small-en-us-0.15"
 # Override with e.g. WHISPER_MODEL=large-v3 (most accurate) or =small (fastest).
 WHISPER_SIZE = os.environ.get("WHISPER_MODEL", "medium")
+# Force a language to stop auto-detect mistakes, e.g. INTERVIEW_LANG=en or =ro.
+# Empty/unset = auto-detect (handles Romanian + English automatically).
+FORCE_LANG = os.environ.get("INTERVIEW_LANG", "").strip().lower() or None
 SR = 16000
 
 _whisper_model = None  # cached across recordings
@@ -51,14 +54,33 @@ def _resample_16k(samples: np.ndarray, sr: int) -> np.ndarray:
     return np.interp(xq, xp, x).astype(np.float32)
 
 
-def transcribe(samples: np.ndarray, sr: int) -> Transcript:
+ALLOWED_LANGS = ("en", "ro")   # constrain auto-detect to these (avoids EN->RO mistakes)
+
+
+def transcribe(samples: np.ndarray, sr: int, language: str | None = None) -> Transcript:
     audio = _resample_16k(samples, sr)
     if audio.size < SR // 2:           # < 0.5 s of audio
         return Transcript()
-    return _whisper(audio) or _vosk(audio) or Transcript()
+    return _whisper(audio, language) or _vosk(audio) or Transcript()
 
 
-def _whisper(audio: np.ndarray) -> Transcript | None:
+def _resolve_lang(audio: np.ndarray, language: str | None) -> str | None:
+    """Forced language wins; otherwise auto-detect but CONSTRAINED to en/ro, which
+    fixes Whisper picking Romanian for English on short/accented clips."""
+    lang = (language or FORCE_LANG)
+    if lang and lang.lower() not in ("", "auto"):
+        return lang.lower()
+    try:
+        _l, _p, all_probs = _whisper_model.detect_language(audio, language_detection_segments=4)
+        cand = {lng: p for lng, p in all_probs if lng in ALLOWED_LANGS}
+        if cand:
+            return max(cand, key=cand.get)
+    except Exception:  # noqa: BLE001
+        pass
+    return None  # fall back to free auto-detect
+
+
+def _whisper(audio: np.ndarray, language: str | None = None) -> Transcript | None:
     try:
         from faster_whisper import WhisperModel
     except Exception:  # noqa: BLE001
@@ -69,7 +91,9 @@ def _whisper(audio: np.ndarray) -> Transcript | None:
             _whisper_model = WhisperModel(WHISPER_SIZE, device="cpu",
                                          compute_type="int8",
                                          download_root=str(WHISPER_DIR))
-        seg_gen, info = _whisper_model.transcribe(audio, beam_size=5, vad_filter=True)
+        lang = _resolve_lang(audio, language)
+        seg_gen, info = _whisper_model.transcribe(audio, beam_size=5, vad_filter=True,
+                                                 language=lang)
         segs, texts = [], []
         for s in seg_gen:
             txt = s.text.strip()

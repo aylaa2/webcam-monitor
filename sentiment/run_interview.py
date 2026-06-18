@@ -27,11 +27,11 @@ import cv2
 
 from sentiment import blendshape_emotion as be
 from sentiment import features as F
-from sentiment import fusion, hr
+from sentiment import emotion_model, fusion, hr, integrity
 from sentiment.calibration import BaselineCalibrator
 from sentiment.classifier import EmotionClassifier
 from sentiment.report import Recorder
-from sentiment.temporal import EmotionFilter
+from sentiment.temporal import EmotionDecider
 from audio import lexicon, prosody, transcribe
 from audio.capture import AudioRecorder
 from vision import draw, ui
@@ -45,7 +45,7 @@ _EMO_COLORS = {
     "sad": draw.BLUE, "angry": draw.RED, "fear": (200, 120, 220),
     "disgust": (120, 200, 160),
 }
-_BS_EMA = 0.35
+_BS_EMA = 0.5   # snappier blendshape smoothing so brief expressions register
 
 
 def _emotion_panel(frame, smoothed):
@@ -101,10 +101,12 @@ def _calibration_overlay(frame, remaining):
               w // 2 - 80, h // 2 + 22, draw.WHITE, 0.6)
 
 
-def run(camera_index: int = 0) -> None:
-    tracker = FaceTracker(num_faces=1)
+def run(camera_index: int = 0, lang: str | None = None) -> None:
+    tracker = FaceTracker(num_faces=2)   # 2 so a second person can be flagged
     clf = EmotionClassifier.load()
-    source = "SVM (trained)" if clf else "blendshape rules"
+    use_hse = emotion_model.available()
+    source = ("HSEmotion + rules" if use_hse else
+              "SVM (trained)" if clf else "blendshape rules")
 
     cv2.namedWindow(MAIN)
     mouse = ui.MouseState()
@@ -112,9 +114,11 @@ def run(camera_index: int = 0) -> None:
     cv2.moveWindow(MAIN, 60, 60)
 
     state = "idle"
-    rec = efilter = blink = calib = speak = audio = None
+    rec = decider = blink = calib = speak = audio = hse = None
     ema_bs: dict[str, float] = {}
     rec_start = 0.0
+    second_face_seen = False
+    lang_choice = lang if lang in ("en", "ro") else "auto"
     last_smoothed: dict[str, float] = {}
     report_placed = detail_placed = False
     report_mouse = ui.MouseState()
@@ -123,14 +127,17 @@ def run(camera_index: int = 0) -> None:
     report_scale = 1.0
 
     def begin():
-        nonlocal rec, efilter, blink, calib, speak, audio, ema_bs, state
+        nonlocal rec, decider, blink, calib, speak, audio, hse, ema_bs, state
+        nonlocal second_face_seen
         rec = Recorder()
-        efilter = EmotionFilter(be.EMOTIONS, stickiness=0.9)
+        decider = EmotionDecider(be.EMOTIONS)  # stable, committed emotion decision
         blink = F.BlinkCounter()
         calib = BaselineCalibrator(seconds=2.5)
         speak = F.SpeakingDetector()
         audio = AudioRecorder()
+        hse = emotion_model.Throttle(every=3)
         ema_bs = {}
+        second_face_seen = False
         state = "calibrating"
 
     def finish():
@@ -148,8 +155,9 @@ def run(camera_index: int = 0) -> None:
         rec.print_report()
 
         if audio_res and audio_res.available:
-            print("Transcribing (Whisper)...")
-            tr = transcribe.transcribe(audio_res.samples, audio_res.sr)
+            print(f"Transcribing (Whisper, lang={lang_choice})...")
+            forced = None if lang_choice == "auto" else lang_choice
+            tr = transcribe.transcribe(audio_res.samples, audio_res.sr, language=forced)
             pf = prosody.analyze(audio_res.samples, audio_res.sr)
         else:
             tr, pf = transcribe.Transcript(), prosody.ProsodyFeatures()
@@ -157,7 +165,8 @@ def run(camera_index: int = 0) -> None:
         hrr = hr.compute(face, pf, ws, face["duration_s"], transcript=tr.text,
                          segments=tr.segments, language=tr.language, engine=tr.engine)
         hrr.emotion_description = rec.describe()
-        hrr.emotion_moments = rec.emotional_moments()
+        hrr.emotion_moments = hr.attach_quotes(rec.emotional_moments(), tr.segments)
+        hrr.integrity = integrity.compute(rec, pf, ws, second_face_seen)
         print("\nHR SUMMARY:", hrr.narrative)
         last_hr = hrr
 
@@ -202,31 +211,43 @@ def run(camera_index: int = 0) -> None:
                 feats = F.compute(res.landmarks, res.transform, w / h)
 
                 if state == "calibrating":
-                    calib.update(res.blendshapes, feats.yaw, feats.pitch)
+                    calib.update(res.blendshapes, feats.yaw, feats.pitch,
+                                 feats.gaze_x, feats.gaze_y)
                     _calibration_overlay(frame, calib.remaining())
                     if calib.done:
                         state = "recording"
                         rec.t0 = rec_start = time.monotonic()
                         audio.start()   # begin mic capture once calibration is done
                 elif state == "recording":
+                    if res.n_faces > 1:
+                        second_face_seen = True
                     speaking = speak.update(res.blendshapes.get("jawOpen", 0.0))
                     bs_adj = calib.adjust_blendshapes(res.blendshapes)
                     for k, v in bs_adj.items():
                         ema_bs[k] = _BS_EMA * v + (1 - _BS_EMA) * ema_bs.get(k, v)
-                    probs, valence, arousal = be.predict(ema_bs, speaking=speaking)
-                    if clf is not None:
+                    rule_probs, valence, arousal = be.predict(ema_bs, speaking=speaking)
+                    model_probs = hse.step(frame, res.landmarks)
+                    if model_probs is not None:
+                        probs = emotion_model.fuse(model_probs, rule_probs, speaking=speaking)
+                    elif clf is not None:
                         probs = clf.predict_proba(feats.feature_vector())
-                    smoothed = efilter.update(probs)
+                    else:
+                        probs = rule_probs
+                    committed, smoothed = decider.update(probs)
                     last_smoothed = smoothed
                     if blink.update(feats.ear):
                         rec.blink_total = blink.count
                     blink_rate = blink.rate_per_min(time.monotonic() - rec_start)
                     feats_adj = replace(feats, yaw=feats.yaw - calib.base_yaw,
-                                        pitch=feats.pitch - calib.base_pitch)
+                                        pitch=feats.pitch - calib.base_pitch,
+                                        gaze_x=feats.gaze_x - calib.base_gaze_x,
+                                        gaze_y=feats.gaze_y - calib.base_gaze_y)
                     eng = fusion.compute(feats_adj, valence, blink_rate)
-                    rec.add(smoothed, eng, valence, arousal)
+                    rec.add(smoothed, eng, valence, arousal,
+                            gaze_x=feats_adj.gaze_x, gaze_y=feats_adj.gaze_y,
+                            yaw=feats_adj.yaw, pitch=feats_adj.pitch)
 
-                    top = max(smoothed, key=smoothed.get)
+                    top = committed
                     draw.toast(frame, f"{top.upper()}  ({smoothed[top] * 100:.0f}%)",
                                _EMO_COLORS.get(top, draw.WHITE))
                     _emotion_panel(frame, smoothed)
@@ -248,6 +269,8 @@ def run(camera_index: int = 0) -> None:
             quit_btn = ui.Button(w // 2 + 20, h - 52, 120, 40, "Quit", (90, 90, 90))
             primary.draw(frame, mouse.hover)
             quit_btn.draw(frame, mouse.hover)
+            lang_name = {"auto": "AUTO", "en": "English", "ro": "Romana"}[lang_choice]
+            draw.text(frame, f"lang: {lang_name}  ('l' to change)", 22, h - 24, draw.YELLOW, 0.5)
             draw.text(frame, "SPACE start/stop  -  q stop  -  ESC quit",
                       w - 360, h - 24, draw.DIM, 0.45)
 
@@ -268,6 +291,8 @@ def run(camera_index: int = 0) -> None:
                     finish()
             elif key == ord("q") and state == "recording":
                 finish()
+            elif key == ord("l"):              # cycle transcript language
+                lang_choice = {"auto": "en", "en": "ro", "ro": "auto"}[lang_choice]
 
             # report window: click a skill / section for a "what was said" detail
             rc = report_mouse.take_click()

@@ -28,6 +28,7 @@ class FaceResult:
     landmarks: np.ndarray | None = None          # (478, 3) normalized x,y,z
     blendshapes: dict[str, float] = field(default_factory=dict)
     transform: np.ndarray | None = None          # (4, 4) face->camera, or None
+    n_faces: int = 0                             # number of faces detected this frame
 
     @property
     def ok(self) -> bool:
@@ -61,6 +62,7 @@ class FaceTracker:
         if not res.face_landmarks:
             return FaceResult()
 
+        n_faces = len(res.face_landmarks)
         lms = res.face_landmarks[0]
         landmarks = np.array([[p.x, p.y, p.z] for p in lms], dtype=np.float32)
 
@@ -73,7 +75,8 @@ class FaceTracker:
         if res.facial_transformation_matrixes:
             transform = np.array(res.facial_transformation_matrixes[0], dtype=np.float32)
 
-        return FaceResult(landmarks=landmarks, blendshapes=blendshapes, transform=transform)
+        return FaceResult(landmarks=landmarks, blendshapes=blendshapes,
+                          transform=transform, n_faces=n_faces)
 
     def close(self) -> None:
         self._landmarker.close()

@@ -4,6 +4,7 @@ opencv-python>=4.9
 mediapipe>=0.10.14
 numpy>=1.26,<2.1
 scikit-learn>=1.4
+hsemotion-onnx>=0.3     # AffectNet face-emotion model (ONNX), ensembled with rules
 pyautogui>=0.9.54
 matplotlib>=3.8
 joblib>=1.3
