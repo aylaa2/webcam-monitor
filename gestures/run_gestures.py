@@ -1,16 +1,12 @@
-"""Gesture control studio — webcam gestures drive real macOS actions, with a
-separate native "Action Log" window recording every action that fired.
+"""Gesture mode: webcam -> hand landmarks -> pose -> FSM -> real macOS action.
 
-Two windows:
-  - "Gesture Control" : live camera, hand skeletons, gesture legend, current pose.
-  - "Action Log"      : timestamped, scrolling history of every action performed.
+Accuracy aids:
+  - EMA smoothing of the controlling hand's landmarks (kills jitter)
+  - hold-to-confirm on static gestures + per-action cooldown (no accidental fires)
 
-Accuracy aids: EMA-smoothed hand landmarks + hold-to-confirm + per-action cooldown.
-
-Controls:  q or ESC = quit
 Run:
-    python app.py gestures            # LIVE — controls macOS
-    python app.py gestures --dry-run  # safe preview, prints/logs only
+    python app.py gestures            # LIVE — actually controls macOS
+    python app.py gestures --dry-run  # safe preview, prints actions only
     python app.py gestures --camera 1
 """
 from __future__ import annotations
@@ -30,8 +26,7 @@ from vision import draw, ui
 from vision.camera import Camera
 from vision.hands import HandTracker
 
-MAIN, LOG = "Gesture Control", "Action Log"
-_LM_EMA = 0.5
+_LM_EMA = 0.5  # landmark smoothing (higher = snappier, lower = steadier)
 _LEGEND = [
     ("point index finger", "move cursor"),
     ("hold still ~2.5s", "left click"),
@@ -40,6 +35,7 @@ _LEGEND = [
     ("peace (hold)", "screenshot"),
     ("thumbs up / down", "play-pause / mute"),
     ("pinch", "mission control"),
+    ("two open palms", "switch app"),
 ]
 
 
@@ -49,32 +45,41 @@ def _primary_hand(hands):
     return max(hands, key=lambda h: poses.hand_scale(h.landmarks))
 
 
+def _split_hands(hands):
+    """Return (activator, command).
+
+    The activator is an OPEN-PALM hand; the command hand is the other one. This
+    is independent of which side of the frame each hand is on, so it doesn't
+    depend on the camera being mirrored. Returns (None, None) until two hands are
+    visible and at least one of them is an open palm.
+    """
+    if len(hands) < 2:
+        return None, None
+    tagged = [(h, poses.classify(h.landmarks)) for h in hands]
+    palms = [h for h, p in tagged if p == poses.OPEN_PALM]
+    if not palms:
+        return None, None
+    non_palms = [h for h, p in tagged if p != poses.OPEN_PALM]
+    activator = palms[0]
+    if non_palms:
+        command = non_palms[0]               # the hand that's actually gesturing
+    else:
+        # Both hands are open palms (e.g. the open phase of an open->fist grab).
+        # Keep the command hand stable by picking the rightmost as command.
+        ordered = sorted(hands, key=lambda hd: float(hd.landmarks[:, 0].mean()))
+        activator, command = ordered[0], ordered[-1]
+    return activator, command
+
+
 def _draw_legend(frame):
     x = frame.shape[1] - 300
     draw.panel(frame, x, 10, 290, 30 + 22 * len(_LEGEND))
-    draw.text(frame, "LEFT palm on -> RIGHT hand:", x + 12, 32, draw.WHITE, 0.55, 2)
+    draw.text(frame, "Gestures", x + 12, 32, draw.WHITE, 0.6, 2)
     y = 54
     for g, a in _LEGEND:
         draw.text(frame, g, x + 12, y, draw.YELLOW, 0.45)
         draw.text(frame, a, x + 165, y, draw.DIM, 0.45)
         y += 22
-
-
-def _render_log(entries: deque, total: int, live: bool) -> np.ndarray:
-    width, rows = 440, 18
-    canvas = np.full((70 + rows * 26, width, 3), (30, 28, 26), np.uint8)
-    ui.text(canvas, "ACTION LOG", 20, 34, (120, 200, 140), 0.8, 2)
-    mode = "LIVE" if live else "DRY-RUN"
-    ui.text(canvas, f"{mode}   total: {total}", 20, 56, (165, 165, 160), 0.5)
-    cv2.line(canvas, (20, 66), (width - 20, 66), (70, 68, 64), 1)
-    y = 92
-    for ts, label in list(entries)[-rows:][::-1]:
-        ui.text(canvas, ts, 20, y, (150, 180, 235), 0.5)
-        ui.text(canvas, label, 110, y, (238, 238, 238), 0.5)
-        y += 26
-    if not entries:
-        ui.text(canvas, "make a gesture to begin...", 20, 92, (120, 120, 118), 0.5)
-    return canvas
 
 
 def run(camera_index: int = 0, live: bool = True) -> None:
@@ -91,26 +96,13 @@ def run(camera_index: int = 0, live: bool = True) -> None:
 
     smoothed_lm = None
     toast_msg, toast_t = "", 0.0
-    switch_cooldown = 0.0
     fps_t, fps = time.monotonic(), 0.0
 
-    banner = "LIVE - controlling macOS" if live else "DRY-RUN - logging only"
-    print(f"Gesture Control open.  [{banner}]   q/ESC to quit.")
+    banner = "LIVE — controlling macOS" if live else "DRY-RUN — printing only"
+    print(f"Gesture mode ready.  [{banner}]")
     if live:
         print("  (window/slide/play actions need Terminal in Accessibility permissions)")
-
-    def log_action(label):
-        nonlocal total, toast_msg, toast_t
-        log.append((time.strftime("%H:%M:%S"), label))
-        toast_msg, toast_t = label, time.monotonic()
-        total += 1
-
-    def record(event):
-        label = controller.dispatch(event)
-        if label:
-            log_action(label)
-            return True
-        return False
+    print("Press 'q' to quit.")
 
     with Camera(camera_index) as cam:
         while True:
@@ -119,25 +111,15 @@ def run(camera_index: int = 0, live: bool = True) -> None:
                 continue
             h, w = frame.shape[:2]
             hands = tracker.process(frame)
-            for hnd in hands:
-                draw.draw_hand(frame, hnd.landmarks)
+            for h in hands:
+                draw.draw_hand(frame, h.landmarks)
 
-            # --- two-hand activation gate ---------------------------------
-            # Nothing happens unless your LEFT hand is an open palm. Then your
-            # RIGHT hand makes the command gesture. This prevents incidental hand
-            # movements (scratching your face, etc.) from doing anything.
-            left_hand = right_hand = None
-            if len(hands) >= 2:                 # mirrored view: left hand = smaller x
-                ordered = sorted(hands, key=lambda hd: float(hd.landmarks[:, 0].mean()))
-                left_hand, right_hand = ordered[0], ordered[-1]
-            active = (left_hand is not None
-                      and poses.classify(left_hand.landmarks) == poses.OPEN_PALM)
-            cmd = right_hand if active else None
-
-            if cmd is not None:
-                if smoothed_lm is None or smoothed_lm.shape != cmd.landmarks.shape:
-                    smoothed_lm = cmd.landmarks.copy()
-                smoothed_lm = _LM_EMA * cmd.landmarks + (1 - _LM_EMA) * smoothed_lm
+            primary = _primary_hand(hands)
+            # EMA-smooth the controlling hand's landmarks for stable poses.
+            if primary is not None:
+                if smoothed_lm is None or smoothed_lm.shape != primary.landmarks.shape:
+                    smoothed_lm = primary.landmarks.copy()
+                smoothed_lm = _LM_EMA * primary.landmarks + (1 - _LM_EMA) * smoothed_lm
                 hand_in = types.SimpleNamespace(
                     landmarks=smoothed_lm, handedness=cmd.handedness, score=cmd.score)
             else:
@@ -158,33 +140,20 @@ def run(camera_index: int = 0, live: bool = True) -> None:
             if click:
                 log_action(click)
             now = time.monotonic()
-
-            # highlight the activating left palm
-            if left_hand is not None:
-                lx = int(left_hand.landmarks[:, 0].mean() * w)
-                ly = int(left_hand.landmarks[:, 1].mean() * h)
-                col = draw.GREEN if active else (90, 90, 90)
-                cv2.circle(frame, (lx, ly), 26, col, 2, cv2.LINE_AA)
-
-            # --- cursor pointer + dwell ring (drawn on the fingertip) ---
-            if cursor_active and hand_in is not None:
-                cx, cy = int(smoothed_lm[8, 0] * w), int(smoothed_lm[8, 1] * h)
-                cv2.circle(frame, (cx, cy), 10, draw.YELLOW, 2, cv2.LINE_AA)
-                cv2.circle(frame, (cx, cy), 2, draw.WHITE, -1, cv2.LINE_AA)
-                if cursor.progress > 0:
-                    cv2.ellipse(frame, (cx, cy), (16, 16), -90, 0,
-                                int(360 * cursor.progress), draw.GREEN, 3, cv2.LINE_AA)
+            if (len(hands) == 2
+                    and all(poses.classify(h.landmarks) == poses.OPEN_PALM for h in hands)
+                    and now - switch_cooldown > 1.5):
+                switch_cooldown = now
+                label = controller.dispatch("SWITCH")
+                if label:
+                    toast_msg, toast_t = label, now
 
             # --- main HUD ---
             draw.panel(frame, 10, 10, 360, 86)
             draw.text(frame, "Gesture Control", 22, 36, draw.WHITE, 0.7, 2)
             draw.text(frame, banner, 22, 58, draw.RED if live else draw.GREEN, 0.5)
-            if active:
-                draw.text(frame, f"ACTIVE   pose: {pose_now}", 22, 80, draw.GREEN, 0.5)
-                if recognizer.locked():
-                    draw.text(frame, "WAIT", 300, 80, draw.RED, 0.5, 2)
-            else:
-                draw.text(frame, "show your LEFT palm to activate", 22, 80, draw.YELLOW, 0.5)
+            pose_now = poses.classify(hand_in.landmarks) if hand_in else "—"
+            draw.text(frame, f"pose: {pose_now}", 22, 80, draw.DIM, 0.5)
             _draw_legend(frame)
             fps = 0.9 * fps + 0.1 * (1.0 / max(1e-3, now - fps_t))
             fps_t = now

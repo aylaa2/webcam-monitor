@@ -52,7 +52,25 @@ class FaceTracker:
         self._t0 = time.monotonic()
 
     def _timestamp_ms(self) -> int:
-        return int((time.monotonic() - self._t0) * 1000)
+        import time
+        # Get the current time in milliseconds
+        ts = int(time.perf_counter() * 1000)
+        
+        # If this is the first frame, initialize the tracker
+        if not hasattr(self, '_last_ts'):
+            self._last_ts = ts - 1
+            
+        # FORCE the timestamp to be at least 1ms higher than the previous frame
+        if ts <= self._last_ts:
+            ts = self._last_ts + 1
+            
+        self._last_ts = ts
+        return ts
+
+    def process(self, frame_bgr: np.ndarray) -> FaceResult:
+        rgb = frame_bgr[:, :, ::-1].copy()  # BGR -> RGB
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        res = self._landmarker.detect_for_video(mp_image, self._timestamp_ms())
 
     def process(self, frame_bgr: np.ndarray) -> FaceResult:
         rgb = frame_bgr[:, :, ::-1].copy()  # BGR -> RGB

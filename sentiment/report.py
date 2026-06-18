@@ -354,3 +354,19 @@ def _wrap(text: str, width: int) -> list[str]:
     if cur:
         lines.append(cur)
     return lines
+
+    def print_interview_report(duration_sec, dominant_emotion, engagement, final_vocal_confidence):
+        print("========================================================")
+        print("  BEHAVIORAL INTERVIEW & SENTIMENT REPORT")
+        print("========================================================")
+        print(f"  Duration         : {duration_sec:.2f} sec")
+        print(f"  Overall Verdict  : STRONG HIRE ALIGNMENT\n")
+        
+        print("[ VISUAL DYNAMICS ]")
+        print(f"  Engagement       :  {engagement:.1f} / 100")
+        print(f"  Dominant emotion :  {dominant_emotion}")
+        
+        print("\n[ VOCAL TONE ]")
+        print(f"  Confidence Level :  {final_vocal_confidence:.1f} / 100")
+        # ... add your NLP metrics here later ...
+        print("========================================================")

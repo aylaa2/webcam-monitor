@@ -46,8 +46,9 @@ class HandTracker:
         self._t0 = time.monotonic()
 
     def _timestamp_ms(self) -> int:
-        return int((time.monotonic() - self._t0) * 1000)
-
+       self._ts = getattr(self, "_ts", 0) + 33
+       return self._ts
+       
     def process(self, frame_bgr: np.ndarray) -> list[Hand]:
         rgb = frame_bgr[:, :, ::-1].copy()
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)

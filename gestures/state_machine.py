@@ -34,14 +34,11 @@ PEACE = "PEACE"
 class GestureRecognizer:
     def __init__(
         self,
-        grab_window: float = 1.0,      # max seconds between open hand and fist
-        cooldown: float = 1.4,         # min seconds between any two discrete events
-        refractory: float = 1.0,       # post-gesture lockout: ignore + clear buffers
-        hold_frames: int = 6,          # frames a static gesture must persist
-        rot_time: float = 1.3,         # window of the rotation trail
-        rot_angle: float = 1.2,        # radians swept to count as one rotation step
-        rot_cooldown: float = 0.4,     # seconds between volume steps while rotating
-        rot_min_span: float = 0.025,   # min 2D extent so a stray move isn't a turn
+        grab_window: float = 0.8,      # max seconds between open palm and fist
+        swipe_dist: float = 0.22,      # min normalized wrist travel for a swipe
+        swipe_time: float = 0.35,      # window over which travel is measured
+        cooldown: float = 1.0,         # min seconds between any two fired events
+        hold_frames: int = 8,          # frames a static gesture must persist
     ) -> None:
         self.grab_window = grab_window
         self.cooldown = cooldown
